@@ -21,13 +21,16 @@ The numbers at the top also work as filters. Tap **Need SEO / PPC** to see only 
 
 Changes save as soon as you make them, and everyone sees the same list. When you come back to the tab, the desk loads anything teammates changed in the meantime.
 
+The Edit dialog sends only the fields you changed. If a teammate saved the same site while your dialog was open, the desk refuses the save instead of overwriting their change. The dialog then shows their version with your changes on top. Any field you both changed is highlighted for you to check before saving again.
+
 ## How it is built
 
 - **Cloudflare Worker** (`src/worker.js`) serves the page from `public/` and answers `/api/sites`.
-- **A Durable Object with SQLite** (`DESK` binding, class `Desk`) holds the list: one table, `sites`, inside one object placed in eastern North America. The table is created the first time the object starts, so there is no migration step. It is not D1 because this Cloudflare account is at the Free plan's limit of 10 D1 databases, all used by client sites. A single object is also strongly consistent: every write goes through one place, so two people saving at the same moment cannot overwrite each other's change.
+- **A Durable Object with SQLite** (`DESK` binding, class `Desk`) holds the list: one table, `sites`, inside one object placed in eastern North America. The table is created the first time the object starts, so there is no migration step. It is not D1 because this Cloudflare account is at the Free plan's limit of 10 D1 databases, all used by client sites. A single object is also strongly consistent: every write goes through one place, one at a time.
 - **`src/sites.js`** is the one place that defines a site record: its fields, what each one may hold, and how input is cleaned. For example, `https://www.Example.com/` becomes `www.example.com`, and a GitHub link becomes `owner/repo`.
 - **The page** is plain HTML, CSS and JS in `public/`, with no framework and no build step.
-- **Privacy**: the list sits behind a shared desk key (`DASH_KEY`). With no key set, nobody can get in: the desk refuses every request rather than showing the list openly. `public/_headers` sends `X-Robots-Tag: noindex` and a strict Content-Security-Policy.
+- **Privacy**: the list sits behind a shared desk key (`DASH_KEY`). With no key set, nobody can get in: the desk refuses every request rather than showing the list openly. `public/_headers` sends `X-Robots-Tag: noindex` and a strict Content-Security-Policy. Workers Logs drop query strings.
+- **HTTPS only**: the 10xid.com zone's "Always Use HTTPS" is off, and turning it on would change every client host on the zone. So this Worker enforces HTTPS itself. It sees every request (`run_worker_first: true`), redirects plain-HTTP pages to HTTPS, refuses plain-HTTP API calls, and sends HSTS for this host only.
 
 ## Run it locally
 
@@ -62,6 +65,16 @@ To let someone in, share the key. To lock everyone out, rotate it by setting a n
 openssl rand -hex 24 | npx wrangler secret put DASH_KEY
 ```
 
+## Backups and undo
+
+A Durable Object's SQLite database keeps 30 days of point-in-time history on Cloudflare's side. There is no button for it on the desk. To undo a bad delete or edit, restore the object to a moment before it happened with `ctx.storage.getBookmarkForTime()` and `onNextSessionRestoreBookmark()`. This rolls back the whole list, not a single row.
+
+For a copy you hold yourself, save the list:
+
+```sh
+curl -s https://website.10xid.com/api/sites -H "Authorization: Bearer $DASH_KEY" > desk-backup.json
+```
+
 ## API
 
 Every request needs `Authorization: Bearer <DASH_KEY>`.
@@ -70,7 +83,7 @@ Every request needs `Authorization: Bearer <DASH_KEY>`.
 | --- | --- | --- | --- |
 | GET | `/api/sites` | – | `{ sites: [...] }` |
 | POST | `/api/sites` | a site (`name` required) | `201 { site }` |
-| PATCH | `/api/sites/:id` | only the fields to change | `{ site }` |
+| PATCH | `/api/sites/:id` | only the fields to change, optionally `expected_updated_at` | `{ site }`, or `409 { code: "conflict", site }` if the row changed since that time |
 | DELETE | `/api/sites/:id` | – | `{ deleted: id }` |
 
 Field values:

@@ -1,13 +1,15 @@
-// The desk's only server code. The page itself is a static file served from
-// public/ before this runs; the Worker answers /api/* alone (see
-// run_worker_first in wrangler.jsonc).
+// The desk's only server code. Every request comes through here first
+// (run_worker_first in wrangler.jsonc) so that plain HTTP can be turned away;
+// the page itself is then served from public/ by the assets binding, and the
+// Worker answers /api/* itself.
 //
 // The list lives in one Durable Object with its own SQLite database, not in
 // D1: the account is at the Workers Free plan's limit of ten D1 databases,
 // every one of them holding a client site's forms or blog. A single object is
 // also the simplest thing that is strongly consistent — every read and write
-// goes through the same instance, so two people saving at once cannot lose
-// each other's change.
+// goes through the same instance, one at a time. On top of that, an edit can
+// name the updated_at it started from, and is refused if the row has moved on
+// since, so a stale edit cannot overwrite a teammate's newer one.
 
 import { DurableObject } from 'cloudflare:workers';
 import { cleanSite, toJson, InvalidField, FLAGS } from './sites.js';
@@ -62,14 +64,21 @@ export class Desk extends DurableObject {
     return this.read(id);
   }
 
-  update(id, fields) {
+  // Returns { site }, { missing: true }, or { conflict: true, site } when
+  // `expected` (the updated_at the editor started from) is no longer current.
+  // The read and the write run in one synchronous call, so nothing can land
+  // between the check and the update.
+  update(id, fields, expected) {
+    const current = this.read(id);
+    if (!current) return { missing: true };
+    if (expected && current.updated_at !== expected) return { conflict: true, site: current };
     const keys = Object.keys(fields).filter((k) => COLUMNS.includes(k));
-    if (!this.read(id)) return null;
+    if (!keys.length) return { site: current };
     this.sql.exec(
       `UPDATE sites SET ${keys.map((k) => k + ' = ?').join(', ')}, updated_at = ? WHERE id = ?`,
       ...keys.map((k) => fields[k]), new Date().toISOString(), id
     );
-    return this.read(id);
+    return { site: this.read(id) };
   }
 
   remove(id) {
@@ -89,8 +98,20 @@ function json(body, status = 200) {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
       'x-robots-tag': 'noindex, nofollow, noarchive',
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'strict-transport-security': 'max-age=31536000',
     },
   });
+}
+
+// The zone's own "Always Use HTTPS" is off, and turning it on would change
+// every *.10xid.com client host, so this host enforces HTTPS itself. On unless
+// HTTPS_ONLY is "off", which only .dev.vars sets: `wrangler dev` is plain HTTP
+// and rewrites the host to website.10xid.com, so the host cannot tell local
+// from live.
+function insecure(url, env) {
+  return url.protocol === 'http:' && env.HTTPS_ONLY !== 'off';
 }
 
 async function digest(s) {
@@ -133,10 +154,19 @@ async function handleApi(request, env, url) {
       return json({ site: await desk(env).create(fields) }, 201);
     }
     if (id && m === 'PATCH') {
-      const fields = cleanSite(await readBody(request));
+      const body = await readBody(request);
+      const fields = cleanSite(body);
       if (!Object.keys(fields).length) throw new InvalidField(null, 'Nothing to change.');
-      const site = await desk(env).update(id, fields);
-      return site ? json({ site }) : notFound();
+      const expected = body.expected_updated_at;
+      if (expected != null && (typeof expected !== 'string' || expected.length > 40)) {
+        throw new InvalidField('expected_updated_at', 'expected_updated_at must be the updated_at string you last saw.');
+      }
+      const res = await desk(env).update(id, fields, expected || null);
+      if (res.missing) return notFound();
+      if (res.conflict) {
+        return json({ error: 'Someone else changed this site while you were editing it.', code: 'conflict', site: res.site }, 409);
+      }
+      return json({ site: res.site });
     }
     if (id && m === 'DELETE') {
       return (await desk(env).remove(id)) ? json({ deleted: id }) : notFound();
@@ -151,7 +181,15 @@ async function handleApi(request, env, url) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return handleApi(request, env, url);
+    const isApi = url.pathname === '/api' || url.pathname.startsWith('/api/');
+    if (insecure(url, env)) {
+      // The API is refused rather than redirected: a client that sent the key
+      // over plain HTTP should fail loudly, not be quietly retried.
+      if (isApi) return json({ error: 'The desk only answers over HTTPS.', code: 'https-only' }, 403);
+      url.protocol = 'https:';
+      return Response.redirect(url.toString(), 301);
+    }
+    if (isApi) return handleApi(request, env, url);
     return env.ASSETS.fetch(request);
   },
 };

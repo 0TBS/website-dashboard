@@ -67,6 +67,8 @@ async function api(method, path, body) {
   if (!res.ok) {
     const e = new Error(data.error || 'The desk answered ' + res.status + '.');
     e.field = data.field;
+    e.code = data.code;
+    e.site = data.site;   // on a 409, the row as it now stands
     throw e;
   }
   return data;
@@ -470,6 +472,33 @@ async function del(btn, id) {
 const editor = $('editor');
 const form = $('edform');
 let editing = null;   // the id being edited, or null when adding
+// An edit sends only what was changed in the dialog, measured against `base`
+// (the form as it opened), and names `baseStamp` (the row's updated_at then).
+// If a teammate saved in the meantime the desk refuses it with a 409, and the
+// dialog merges instead of overwriting: see the conflict branch below.
+let base = null;
+let baseStamp = null;
+
+// A site in the same shape formValues() returns, so the two compare directly.
+function siteToForm(site) {
+  const out = {};
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    const v = site ? site[el.name] : null;
+    out[el.name] = el.name in FLAGS
+      ? (v === true || v === false ? v : null)
+      : (v == null || v === '' ? null : String(v));
+  }
+  return out;
+}
+function fillForm(values) {
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    const v = values[el.name];
+    el.value = v === true ? '1' : v === false ? '0' : v == null ? '' : v;
+  }
+}
+const fieldLabel = (name) => form.elements.namedItem(name).closest('label').querySelector('span').textContent;
 
 function openEditor(site) {
   editing = site ? site.id : null;
@@ -477,13 +506,9 @@ function openEditor(site) {
   form.reset();
   $('ederr').hidden = true;
   form.querySelectorAll('[aria-invalid]').forEach((el) => el.removeAttribute('aria-invalid'));
-  if (site) {
-    for (const el of form.elements) {
-      if (!el.name) continue;
-      const v = site[el.name];
-      el.value = v === true ? '1' : v === false ? '0' : v == null ? '' : v;
-    }
-  }
+  base = siteToForm(site);
+  baseStamp = site ? site.updated_at : null;
+  if (site) fillForm(base);
   editor.showModal();
   form.elements.namedItem('name').focus();
 }
@@ -511,12 +536,19 @@ form.addEventListener('submit', async (e) => {
     form.elements.namedItem('name').focus();
     return;
   }
+  let body = values;
+  if (editing) {
+    body = {};
+    for (const k of Object.keys(values)) if (values[k] !== base[k]) body[k] = values[k];
+    if (!Object.keys(body).length) { editor.close(); return; }   // nothing was changed
+    body.expected_updated_at = baseStamp;
+  }
   const save = $('ed-save');
   save.disabled = true;
   try {
     const { site } = editing
-      ? await api('PATCH', '/api/sites/' + encodeURIComponent(editing), values)
-      : await api('POST', '/api/sites', values);
+      ? await api('PATCH', '/api/sites/' + encodeURIComponent(editing), body)
+      : await api('POST', '/api/sites', body);
     const i = sites.findIndex((s) => s.id === site.id);
     if (i === -1) sites.push(site); else sites[i] = site;
     editor.close();
@@ -531,6 +563,32 @@ form.addEventListener('submit', async (e) => {
     }
   } catch (ex) {
     if (ex instanceof Locked) { editor.close(); lock(ex); return; }
+    if (ex.code === 'conflict' && ex.site) {
+      // Three-way merge. Theirs is the row now; a field only this dialog
+      // changed keeps its new value; a field both changed shows theirs and is
+      // flagged, so nobody's edit disappears without being seen.
+      const theirs = siteToForm(ex.site);
+      const merged = { ...theirs };
+      const clashes = [];
+      for (const k of Object.keys(values)) {
+        if (values[k] === base[k]) continue;
+        if (theirs[k] !== base[k] && theirs[k] !== values[k]) { clashes.push(k); continue; }
+        merged[k] = values[k];
+      }
+      const i = sites.findIndex((s) => s.id === ex.site.id);
+      if (i !== -1) { sites[i] = ex.site; redrawCard(ex.site.id); }
+      base = theirs;
+      baseStamp = ex.site.updated_at;
+      fillForm(merged);
+      clashes.forEach((k) => form.elements.namedItem(k).setAttribute('aria-invalid', 'true'));
+      err.textContent = 'Someone else saved this site while you had it open. Their changes are now in the form' +
+        (clashes.length
+          ? `, and you both changed ${clashes.map(fieldLabel).join(', ')}: the form shows their version of that, so check it. Your other changes are kept.`
+          : ' and yours are kept on top.') +
+        ' Save again when it looks right.';
+      err.hidden = false;
+      return;
+    }
     err.textContent = ex.message;
     err.hidden = false;
     const bad = ex.field && form.elements.namedItem(ex.field);

@@ -1,3 +1,5 @@
 # Copy to .dev.vars for `npm run dev`. In production the key is a Worker
 # secret: `npx wrangler secret put DASH_KEY`.
 DASH_KEY=local-dev-key
+# wrangler dev is plain HTTP; the live desk refuses HTTP unless this is off.
+HTTPS_ONLY=off

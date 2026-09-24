@@ -6,7 +6,8 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"],
+    // Every request, not just /api/*: the Worker turns plain HTTP away.
+    "run_worker_first": true,
     "not_found_handling": "404-page",
     "html_handling": "auto-trailing-slash"
   },
@@ -21,5 +22,6 @@
   "routes": [{ "pattern": "website.10xid.com", "custom_domain": true }],
   "workers_dev": false,
   "preview_urls": false,
-  "observability": { "enabled": true }
+  // Query strings are dropped from logs, so nothing sent in a URL is kept.
+  "observability": { "enabled": true, "redact_query_string": true }
 }
