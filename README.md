@@ -43,6 +43,26 @@ npm test                            # unit tests for the field rules
 
 Local runs keep their own copy of the data inside `.wrangler/`. They never touch the live list.
 
+## Layout check: nothing scrolls sideways
+
+```sh
+npm run check:overflow     # exits 1 on any sideways scroll or spill
+npm run check              # unit tests, then the layout check
+```
+
+This starts the real Worker with a throwaway database and fills it with awkward content: an unbroken 90-character name, a 100-character domain, a long staging path and repo, and notes that are one pasted URL. It opens every screen state: locked, the list, each row opened, no results, the longest filter labels, the add and edit dialogs, an edit error, an edit conflict, an armed delete, and the 404 page. It measures each state at 320, 360, 390, 402, 430, 768, 1024, 1440 and 3440px wide.
+
+It fails if the page is wider than the window, or if any element's content spills out of its own box. When it fails, it names the element. Text cut short with an ellipsis on purpose is listed but does not fail, because the full text is shown elsewhere on the page. The check also fails if the web fonts did not load, because fallback fonts have different widths. Set `ALLOW_FALLBACK_FONTS=1` to measure anyway.
+
+To measure the live desk without writing anything, set `DESK_URL=https://website.10xid.com` and `DESK_KEY=...`. Playwright is pinned to 1.56.1. On a machine without its browser, run `npx playwright install chromium` once, or set `CHROMIUM_PATH` to an existing Chromium.
+
+The layout rules the check enforces:
+
+- Every grid column that holds text is `minmax(0,1fr)`, never an implicit `auto` or a bare `1fr`.
+- Every flex or grid child that holds text has `min-width:0`.
+- Headings and body text use `overflow-wrap:anywhere`.
+- Nothing is hidden with `overflow-x:hidden` to make an overflow go away.
+
 ## Deploy (Cloudflare Workers)
 
 The Worker `website-dashboard` runs on the Cloudflare account that holds the 10xid.com zone. Everything about where it lives is in `wrangler.jsonc`:

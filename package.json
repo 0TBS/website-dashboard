@@ -5,9 +5,12 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "check:overflow": "node scripts/check-overflow.mjs",
+    "check": "npm test && npm run check:overflow"
   },
   "devDependencies": {
+    "playwright": "1.56.1",
     "wrangler": "4.138.0"
   }
 }

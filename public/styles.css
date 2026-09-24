@@ -51,6 +51,12 @@ body{
   padding-block:34px calc(96px + env(safe-area-inset-bottom))}
 @media (max-width:479px){.wrap{padding-inline:16px}}
 code,.mono{font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace}
+/* A word longer than its line breaks instead of widening the page. `anywhere`,
+   not `break-word`: only `anywhere` also lowers the element's min-content
+   width, which is what an intrinsically sized grid or flex parent reads.
+   Without it, a long client name in the Edit dialog's title made the dialog
+   scroll sideways by 64px at 320px (measured by scripts/check-overflow.mjs). */
+h1,h2,h3,p,li,dt,dd{overflow-wrap:anywhere}
 button,input,select,textarea{font:inherit;color:inherit}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 
@@ -96,13 +102,19 @@ h2{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
 .sub strong{color:var(--muted)}
 
 /* ---- search, filters, sort ---- */
-.tools{display:grid;gap:10px;margin:0 0 10px}
+.tools{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;margin:0 0 10px}
 .search input{width:100%;font-size:14.5px;padding:9px 13px;border-radius:10px;
   border:1px solid var(--line-firm);background:var(--card);color:var(--ink)}
 .search input::placeholder{color:var(--faint)}
 .search input:focus-visible,.fsel select:focus-visible{outline:2px solid var(--ink);outline-offset:1px}
 .filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
-@media (max-width:379px){.filters{grid-template-columns:1fr 1fr}}
+/* Two to a row under 380px. Five filters leave Sort alone on the last row,
+   so it takes the whole row: at half width "Recently changed" was cut off by
+   10px at 320px (measured). */
+@media (max-width:379px){
+  .filters{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .filters .fsel:last-child{grid-column:1/-1}
+}
 .fsel{display:flex;flex-direction:column;gap:3px;min-width:0}
 .flbl{font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:500;
   letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
@@ -118,8 +130,13 @@ h2{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
   text-decoration:underline;text-underline-offset:2px}
 .linkbtn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:3px}
 
-/* ---- one row per site ---- */
-.grid{display:grid;gap:10px}
+/* ---- one row per site ----
+   Every single-column grid below names its column minmax(0,1fr). Left to the
+   implicit `auto` column, a grid sizes the column from its content's widest
+   unbreakable run: one long staging path in an opened row made the whole
+   page scroll sideways by 246px at 390px wide (measured by
+   scripts/check-overflow.mjs). */
+.grid{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
 .site{background:var(--card);border:1px solid var(--line);border-radius:14px;
   box-shadow:var(--shadow);display:grid;
   grid-template-columns:minmax(0,1fr) auto;align-items:center;
@@ -156,9 +173,13 @@ h2{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
   text-transform:none;letter-spacing:0;font-size:11px}
 .chev{flex:0 0 11px;width:11px;height:11px;margin-left:-2px;color:var(--faint);
   transition:transform .18s ease}
-.site[data-open] .chev{transform:rotate(180deg)}
+/* Flipped, not rotated. The chevron is symmetric, so the two look the same,
+   but a square turning through 45 degrees is 1.4 times as wide as itself, and
+   Chrome kept that mid-turn width as the name button's overflow (2px, measured)
+   when a dialog opened before the turn had finished. A flip never widens. */
+.site[data-open] .chev{transform:scaleY(-1)}
 /* Opened, a long name is shown whole rather than cut at the ellipsis. */
-.site[data-open] .nmtxt{white-space:normal;overflow-wrap:break-word}
+.site[data-open] .nmtxt{white-space:normal;overflow-wrap:anywhere}
 
 /* Where the live site runs. Spelled out as well as coloured, as on the
    Preview Desk: colour alone says nothing to a colour-blind reader. */
@@ -211,11 +232,11 @@ h2{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
 }
 
 /* ---- the opened row ---- */
-.body{grid-column:1/-1;display:grid;gap:16px;
+.body{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1fr);gap:16px;
   margin-top:10px;padding:13px 2px 2px;border-top:1px solid var(--line)}
 .sect{margin:0 0 7px;font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:500;
   letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
-.addr{margin:0;display:grid;gap:0;border-top:1px solid var(--line)}
+.addr{margin:0;display:grid;grid-template-columns:minmax(0,1fr);gap:0;border-top:1px solid var(--line)}
 .arow{display:grid;grid-template-columns:110px minmax(0,1fr) auto;align-items:center;gap:4px 12px;
   padding:8px 0;border-bottom:1px solid var(--line)}
 .arow dt{font-size:13px;font-weight:600;color:var(--ink)}
@@ -250,7 +271,7 @@ a.val:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radiu
 .seg button:disabled{cursor:progress}
 
 .notes{margin:0;font-size:14px;line-height:1.55;color:var(--body);white-space:pre-wrap;
-  overflow-wrap:break-word;max-width:66ch}
+  overflow-wrap:anywhere;max-width:66ch}
 .bfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px}
 .stamp{font-size:12px;color:var(--faint)}
 .saved{font-weight:600;color:var(--ok)}
@@ -296,7 +317,7 @@ a.addbtn{display:inline-block;text-decoration:none}
   border:1px solid var(--line-firm);border-radius:14px;background:var(--card);color:var(--body);
   box-shadow:0 24px 60px -20px rgba(0,0,0,.55)}
 .editor::backdrop{background:rgba(15,17,19,.55)}
-.editor form{display:grid;gap:12px;padding:20px 18px 18px}
+.editor form{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:20px 18px 18px}
 .editor h3{margin:0 0 2px;font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
   font-size:20px;font-weight:800;letter-spacing:-.02em;color:var(--ink)}
 .field{display:flex;flex-direction:column;gap:4px;min-width:0}
