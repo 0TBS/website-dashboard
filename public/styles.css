@@ -1,0 +1,316 @@
+/* The Preview Desk's system (preview.10xid.com/desk/), carried over: same
+   paper, ink, type and row pattern, so the two desks read as one family. What
+   is new is the colour for each platform and the three flag pills. */
+:root{
+  color-scheme:light dark;
+  --paper:#F1F1EF; --card:#FFFFFF; --sunk:#E7E7E3;
+  --ink:#16181A; --body:#33383B; --muted:#6B7176; --faint:#8A9096;
+  --line:#DEDEDA; --line-firm:#C9C9C3;
+  --ok:#2B6A4D; --ok-bg:#E2EFE7;
+  --open:#8E5416; --open-bg:#F7EADA;
+  --bad:#B4342B; --bad-bg:#F8E5E3;
+  --astro:#6A46B5; --astro-bg:#ECE6F8;
+  --wp:#2F5EA8; --wp-bg:#E4EAF7;
+  --grey:#5C646C; --grey-bg:#E6E8EA;
+  --shadow:0 1px 1px rgba(20,24,26,.04), 0 10px 26px -14px rgba(20,24,26,.28);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0F1113; --card:#181B1E; --sunk:#121416;
+    --ink:#ECEEEF; --body:#C2C8CB; --muted:#8B9297; --faint:#6E757A;
+    --line:#262A2E; --line-firm:#353B40;
+    --ok:#66BC93; --ok-bg:#14271D;
+    --open:#D89A54; --open-bg:#2A2015;
+    --bad:#E98A80; --bad-bg:#2E1917;
+    --astro:#B9A3F0; --astro-bg:#211B30;
+    --wp:#8FB3EE; --wp-bg:#161E2C;
+    --grey:#98A1A9; --grey-bg:#1E2327;
+    --shadow:0 1px 1px rgba(0,0,0,.4), 0 12px 30px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0F1113; --card:#181B1E; --sunk:#121416;
+  --ink:#ECEEEF; --body:#C2C8CB; --muted:#8B9297; --faint:#6E757A;
+  --line:#262A2E; --line-firm:#353B40;
+  --ok:#66BC93; --ok-bg:#14271D;
+  --open:#D89A54; --open-bg:#2A2015;
+  --bad:#E98A80; --bad-bg:#2E1917;
+  --astro:#B9A3F0; --astro-bg:#211B30;
+  --wp:#8FB3EE; --wp-bg:#161E2C;
+  --grey:#98A1A9; --grey-bg:#1E2327;
+  --shadow:0 1px 1px rgba(0,0,0,.4), 0 12px 30px -16px rgba(0,0,0,.8);
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{
+  margin:0;background:var(--paper);color:var(--body);
+  font-family:"Instrument Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:940px;margin:0 auto;padding-inline:20px;
+  padding-block:34px calc(96px + env(safe-area-inset-bottom))}
+@media (max-width:479px){.wrap{padding-inline:16px}}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace}
+button,input,select,textarea{font:inherit;color:inherit}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+
+/* ---- masthead ---- */
+.top{display:flex;flex-wrap:wrap;gap:14px 24px;align-items:flex-end;
+  padding-bottom:20px;border-bottom:1px solid var(--line-firm)}
+.eyebrow{margin:0 0 6px;font-family:"JetBrains Mono",monospace;font-size:11px;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+h1{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
+  font-size:clamp(28px,6.5vw,40px);font-weight:800;letter-spacing:-.025em;
+  line-height:1.02;color:var(--ink);margin:0;text-wrap:balance}
+.lede{flex:1 1 280px;margin:0;font-size:14.5px;color:var(--muted);max-width:46ch}
+.crosslink{margin:0}
+.addbtn{font-size:13.5px;font-weight:600;cursor:pointer;
+  color:var(--paper);background:var(--ink);border:1px solid var(--ink);
+  border-radius:999px;padding:8px 15px;touch-action:manipulation}
+.addbtn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+
+/* ---- status strip: counts that double as filters ---- */
+.status{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+  gap:1px;background:var(--line);border:1px solid var(--line);
+  border-radius:12px;overflow:hidden;margin-top:22px}
+/* A column, so a label that wraps to two lines pushes nothing: every number
+   sits on the same baseline across the strip. */
+.stat{display:flex;flex-direction:column;justify-content:space-between;text-align:left;
+  background:var(--card);padding:13px 15px;border:0;
+  cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.stat:hover .k{color:var(--muted)}
+.stat[aria-pressed="true"]{background:var(--sunk);box-shadow:inset 0 -2px 0 var(--ink)}
+.stat:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
+.stat .k{display:block;margin:0 0 3px;font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--faint);font-weight:600}
+.stat .v{display:block;margin:0;font-size:14.5px;font-weight:600;color:var(--ink)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;
+  padding:2px 9px;border-radius:99px;line-height:1.5}
+.pill::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill-open{color:var(--open);background:var(--open-bg)}
+
+h2{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
+  font-size:13px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);margin:44px 0 4px}
+.sub{margin:0 0 18px;font-size:14px;color:var(--faint)}
+.sub strong{color:var(--muted)}
+
+/* ---- search, filters, sort ---- */
+.tools{display:grid;gap:10px;margin:0 0 10px}
+.search input{width:100%;font-size:14.5px;padding:9px 13px;border-radius:10px;
+  border:1px solid var(--line-firm);background:var(--card);color:var(--ink)}
+.search input::placeholder{color:var(--faint)}
+.search input:focus-visible,.fsel select:focus-visible{outline:2px solid var(--ink);outline-offset:1px}
+.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+@media (max-width:379px){.filters{grid-template-columns:1fr 1fr}}
+.fsel{display:flex;flex-direction:column;gap:3px;min-width:0}
+.flbl{font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:500;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+.fsel select{appearance:none;-webkit-appearance:none;width:100%;min-width:0;
+  font-size:13px;font-weight:600;padding:7px 28px 7px 11px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--line);background-color:var(--card);color:var(--body);
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 9l7 7 7-7' fill='none' stroke='%238A9096' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 9px center;background-size:11px}
+.fsel select[data-active]{border-color:var(--ink);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.sortnote{margin:0 0 16px;font-size:12.5px;color:var(--faint)}
+.sortnote .linkbtn{margin-left:6px}
+.linkbtn{background:none;border:0;padding:0;cursor:pointer;font-size:inherit;color:var(--muted);
+  text-decoration:underline;text-underline-offset:2px}
+.linkbtn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:3px}
+
+/* ---- one row per site ---- */
+.grid{display:grid;gap:10px}
+.site{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  box-shadow:var(--shadow);display:grid;
+  grid-template-columns:minmax(0,1fr) auto;align-items:center;
+  column-gap:6px;padding:8px 9px}
+.site[data-open]{border-color:var(--line-firm)}
+.nm,.btn,.seg button,.stat{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.hd{margin:0;grid-column:1;min-width:0}
+.nm{display:flex;align-items:center;gap:8px;width:100%;min-width:0;
+  font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
+  font-size:14px;font-weight:700;letter-spacing:-.012em;color:var(--ink);
+  background:none;border:0;padding:4px 0;margin:0;text-align:left;cursor:pointer}
+.nm:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:8px}
+.nm:active .nmtxt{color:var(--muted)}
+
+/* The client's mark: their own favicon when their live site has one, and a
+   monogram in a colour of its own when it does not. */
+.mark{position:relative;flex:0 0 auto;width:34px;height:34px;border-radius:8px;
+  display:grid;place-items:center;overflow:hidden;
+  background:var(--mark,var(--grey));box-shadow:0 0 0 1px var(--line) inset}
+.mark .mono{font-family:"Bricolage Grotesque",sans-serif;font-size:12.5px;font-weight:800;
+  letter-spacing:.02em;color:#fff}
+.mark img{position:absolute;inset:0;margin:auto;width:20px;height:20px;object-fit:contain}
+/* White in both themes: favicons are drawn for a light browser tab, and a
+   black one (GitHub's, for one) vanishes on the dark card. */
+.mark[data-icon]{background:#fff}
+.mark[data-icon] .mono{visibility:hidden}
+
+.nmcol{flex:0 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}
+.nmtxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25}
+.nmrole{display:flex;align-items:center;flex-wrap:wrap;gap:2px 7px;
+  font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:500;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+.roletxt{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  text-transform:none;letter-spacing:0;font-size:11px}
+.chev{flex:0 0 11px;width:11px;height:11px;margin-left:-2px;color:var(--faint);
+  transition:transform .18s ease}
+.site[data-open] .chev{transform:rotate(180deg)}
+/* Opened, a long name is shown whole rather than cut at the ellipsis. */
+.site[data-open] .nmtxt{white-space:normal;overflow-wrap:break-word}
+
+/* Where the live site runs. Spelled out as well as coloured, as on the
+   Preview Desk: colour alone says nothing to a colour-blind reader. */
+.lamp{flex:0 0 auto;display:inline-flex;align-items:center;gap:4px;
+  padding:1px 6px 1px 5px;border-radius:999px;font-weight:600;letter-spacing:.08em;
+  color:var(--lamp);background:var(--lamp-bg)}
+.lampdot{flex:0 0 6px;width:6px;height:6px;border-radius:50%;background:currentColor}
+.p-astro{--lamp:var(--astro);--lamp-bg:var(--astro-bg)}
+.p-wordpress{--lamp:var(--wp);--lamp-bg:var(--wp-bg)}
+.p-other,.p-none{--lamp:var(--grey);--lamp-bg:var(--grey-bg)}
+.p-unset{--lamp:var(--faint);--lamp-bg:transparent;box-shadow:inset 0 0 0 1px var(--line-firm)}
+.p-unset .lampdot{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
+
+.acts{grid-column:2;display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+.actlbl{font-family:"JetBrains Mono",monospace;font-size:9.5px;font-weight:500;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--faint);white-space:nowrap}
+.btns{display:flex;gap:6px}
+.btn{flex:0 0 auto;min-width:0;text-align:center;
+  font-size:12px;font-weight:600;line-height:1.2;padding:7px 8px;border-radius:7px;cursor:pointer;
+  text-decoration:none;white-space:nowrap;
+  border:1px solid var(--line-firm);background:transparent;color:var(--ink)}
+.btn:active{background:var(--sunk)}
+.btn.open{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.btn[data-done]{color:var(--ok);border-color:var(--ok);background:transparent}
+.btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.btn:disabled{opacity:.55;cursor:default}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn.danger[data-armed]{background:var(--bad);color:var(--card)}
+.noaddr{font-size:12px;color:var(--faint);white-space:nowrap;padding:7px 0}
+
+/* The three yes/no questions, always in the same order so a column of rows
+   can be read down. Amber is the one that is work still to do. */
+.flags{grid-column:1/-1;list-style:none;margin:6px 0 2px;padding:0 0 0 42px;
+  display:flex;flex-wrap:wrap;gap:5px}
+.flag{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;
+  line-height:1.4;padding:2px 8px;border-radius:6px;
+  color:var(--muted);border:1px solid var(--line-firm)}
+.flag::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 6px}
+.f-ok{color:var(--ok);background:var(--ok-bg);border-color:transparent}
+.f-ours{color:var(--wp);background:var(--wp-bg);border-color:transparent}
+.f-todo{color:var(--open);background:var(--open-bg);border-color:transparent}
+.f-no{color:var(--muted)}
+.f-unset{color:var(--faint);border-style:dashed}
+.f-unset::before{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
+
+@media (max-width:379px){
+  .site{grid-template-columns:minmax(0,1fr);row-gap:7px}
+  .acts{grid-column:1;flex-direction:row;align-items:center;justify-content:space-between}
+  .flags{padding-left:0}
+}
+
+/* ---- the opened row ---- */
+.body{grid-column:1/-1;display:grid;gap:16px;
+  margin-top:10px;padding:13px 2px 2px;border-top:1px solid var(--line)}
+.sect{margin:0 0 7px;font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:500;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+.addr{margin:0;display:grid;gap:0;border-top:1px solid var(--line)}
+.arow{display:grid;grid-template-columns:110px minmax(0,1fr) auto;align-items:center;gap:4px 12px;
+  padding:8px 0;border-bottom:1px solid var(--line)}
+.arow dt{font-size:13px;font-weight:600;color:var(--ink)}
+.arow dd{margin:0;min-width:0}
+.arow .val{display:block;font-size:12.5px;color:var(--body);overflow-wrap:anywhere;text-decoration:none}
+a.val:hover{color:var(--ink);text-decoration:underline;text-underline-offset:2px}
+a.val:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:3px}
+.arow .none{font-size:12.5px;color:var(--faint)}
+/* Narrow: the label and its buttons share the top line and the address gets
+   the whole width below, so a domain is not broken mid-word to fit beside
+   two buttons. */
+@media (max-width:519px){
+  .arow{grid-template-columns:minmax(0,1fr) auto;row-gap:2px}
+  .arow dt{grid-row:1;grid-column:1}
+  .arow dd.btns{grid-row:1;grid-column:2}
+  .arow dd:not(.btns){grid-row:2;grid-column:1/-1}
+}
+
+.ctrls{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px 18px}
+.ctrl{min-width:0}
+.clbl{display:flex;align-items:baseline;gap:8px;margin:0 0 5px;font-size:13px;font-weight:600;color:var(--ink)}
+.clbl .unset{font-size:11.5px;font-weight:500;color:var(--faint)}
+.seg{display:flex;flex-wrap:wrap;border:1px solid var(--line-firm);border-radius:8px;overflow:hidden;
+  background:var(--card)}
+.seg button{flex:1 1 auto;min-width:0;font-size:12.5px;font-weight:600;padding:7px 10px;
+  border:0;background:transparent;color:var(--body);cursor:pointer;white-space:nowrap;
+  box-shadow:-1px 0 0 var(--line-firm)}
+.seg button:first-child{box-shadow:none}
+.seg button:hover{background:var(--sunk)}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
+.seg button:disabled{cursor:progress}
+
+.notes{margin:0;font-size:14px;line-height:1.55;color:var(--body);white-space:pre-wrap;
+  overflow-wrap:break-word;max-width:66ch}
+.bfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px}
+.stamp{font-size:12px;color:var(--faint)}
+.saved{font-weight:600;color:var(--ok)}
+.saved[data-bad]{color:var(--bad)}
+
+/* ---- empty, locked ---- */
+.empty,.gate{display:block;background:var(--card);border:1px solid var(--line);border-radius:14px;
+  box-shadow:var(--shadow);padding:20px 18px}
+.emptyh{margin:0 0 8px;font-size:16px;font-weight:700;color:var(--ink)}
+.emptyp{margin:0;font-size:14px;line-height:1.55;color:var(--faint)}
+.empty .addbtn,.empty .btn{margin-top:14px}
+.gaterow{display:flex;gap:8px;margin-top:14px;max-width:420px}
+.gaterow input{flex:1 1 auto;min-width:0;font-size:14.5px;padding:8px 12px;border-radius:8px;
+  border:1px solid var(--line-firm);background:var(--paper);color:var(--ink)}
+.gaterow input:focus-visible{outline:2px solid var(--ink);outline-offset:1px}
+.gaterow .btn{font-size:13px;padding:8px 14px}
+
+/* ---- the bar at the bottom ---- */
+.dock{position:fixed;left:0;right:0;bottom:0;z-index:20;
+  background:var(--card);border-top:1px solid var(--line-firm);
+  box-shadow:0 -8px 24px -18px rgba(0,0,0,.5);
+  padding:9px 14px calc(9px + env(safe-area-inset-bottom));
+  transform:translateY(0);transition:transform .18s ease, opacity .18s ease}
+.dock[hidden]{display:block!important;transform:translateY(110%);opacity:0;pointer-events:none}
+.dock-in{max-width:940px;margin:0 auto;display:flex;align-items:center;gap:9px}
+.dock-txt{flex:1 1 auto;min-width:0}
+.dock-name{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dock-url{display:block;font-size:12px;color:var(--body);padding:1px 0 0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;user-select:all;-webkit-user-select:all}
+.dock-btn{flex:0 0 auto;font-size:13px;font-weight:600;padding:9px 13px;border-radius:8px;cursor:pointer;
+  text-decoration:none;border:1px solid var(--line-firm);background:transparent;color:var(--ink);
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.dock-btn:active{background:var(--sunk)}
+.dock-btn[data-done]{color:var(--ok);border-color:var(--ok)}
+.dock-open{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.dock-btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+
+/* ---- add / edit ---- */
+.editor{width:min(560px,calc(100vw - 24px));max-height:calc(100dvh - 24px);padding:0;
+  border:1px solid var(--line-firm);border-radius:14px;background:var(--card);color:var(--body);
+  box-shadow:0 24px 60px -20px rgba(0,0,0,.55)}
+.editor::backdrop{background:rgba(15,17,19,.55)}
+.editor form{display:grid;gap:12px;padding:20px 18px 18px}
+.editor h3{margin:0 0 2px;font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
+  font-size:20px;font-weight:800;letter-spacing:-.02em;color:var(--ink)}
+.field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.field>span{font-size:12.5px;font-weight:600;color:var(--ink)}
+.field input,.field select,.field textarea{width:100%;min-width:0;font-size:14.5px;padding:8px 11px;
+  border-radius:8px;border:1px solid var(--line-firm);background:var(--paper);color:var(--ink)}
+.field textarea{resize:vertical;line-height:1.5}
+.field input::placeholder{color:var(--faint)}
+.field :focus-visible{outline:2px solid var(--ink);outline-offset:1px}
+.field [aria-invalid="true"]{border-color:var(--bad);box-shadow:inset 0 0 0 1px var(--bad)}
+.edgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.ederr{margin:0;font-size:13.5px;font-weight:600;color:var(--bad)}
+.edbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+.edbtns .btn{font-size:13.5px;padding:9px 16px}
+
+footer{margin-top:46px;padding-top:18px;border-top:1px solid var(--line);
+  font-size:12.5px;color:var(--faint)}
+footer .linkbtn{display:inline;margin-left:4px;color:var(--faint)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}

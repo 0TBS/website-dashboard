@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0F1113">
+<title>The Website Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/styles.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <p class="eyebrow" id="host">website desk</p>
+      <h1>The Website Desk</h1>
+    </div>
+    <p class="lede">Every client site we look after and where each one stands: what it runs on, whether it has an Astro staging build, whose domain it is, and whether it still needs SEO and PPC work. Change anything here and everyone sees the same list.</p>
+    <p class="crosslink"><button class="addbtn" type="button" id="add">+ Add a site</button></p>
+  </header>
+
+  <!-- Each number is also a filter: tap it to see just those sites, tap again to see them all. -->
+  <div class="status" id="stats">
+    <button class="stat" type="button" data-set='{}'><span class="k">Sites</span><span class="v" data-count="all">–</span></button>
+    <button class="stat" type="button" data-set='{"platform":"astro"}'><span class="k">Live on Astro</span><span class="v" data-count="astro">–</span></button>
+    <button class="stat" type="button" data-set='{"platform":"wordpress"}'><span class="k">Live on WordPress</span><span class="v" data-count="wordpress">–</span></button>
+    <button class="stat" type="button" data-set='{"staging":"yes"}'><span class="k">Astro staging</span><span class="v" data-count="staging">–</span></button>
+    <button class="stat" type="button" data-set='{"domain":"yes"}'><span class="k">Our domains</span><span class="v" data-count="ours">–</span></button>
+    <button class="stat" type="button" data-set='{"seo":"yes"}'><span class="k">Need SEO / PPC</span><span class="v"><span class="pill pill-open" data-count="seo">–</span></span></button>
+  </div>
+
+  <h2>The sites</h2>
+  <p class="sub">Tap a name to see its addresses and change where it stands. Every change saves the moment you make it. A field nobody has filled in says <strong>not set</strong> rather than guessing.</p>
+
+  <div class="tools" id="tools">
+    <label class="search">
+      <span class="sr">Search sites</span>
+      <input type="search" id="f-q" placeholder="Search by name, domain or repo" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="filters">
+      <label class="fsel"><span class="flbl">Live on</span>
+        <select id="f-platform">
+          <option value="">Any</option><option value="astro">Astro</option><option value="wordpress">WordPress</option>
+          <option value="other">Other</option><option value="none">Not live</option><option value="unset">Not set</option>
+        </select>
+      </label>
+      <label class="fsel"><span class="flbl">Astro staging</span>
+        <select id="f-staging">
+          <option value="">Any</option><option value="yes">Yes</option><option value="no">No</option><option value="unset">Not set</option>
+        </select>
+      </label>
+      <label class="fsel"><span class="flbl">Domain</span>
+        <select id="f-domain">
+          <option value="">Any</option><option value="yes">Ours</option><option value="no">Client's</option><option value="unset">Not set</option>
+        </select>
+      </label>
+      <label class="fsel"><span class="flbl">SEO / PPC</span>
+        <select id="f-seo">
+          <option value="">Any</option><option value="yes">Needed</option><option value="no">Not needed</option><option value="unset">Not set</option>
+        </select>
+      </label>
+      <label class="fsel"><span class="flbl">Sort</span>
+        <select id="f-sort">
+          <option value="name">Name, A to Z</option><option value="name-desc">Name, Z to A</option>
+          <option value="updated">Recently changed</option><option value="created">Recently added</option>
+        </select>
+      </label>
+    </div>
+  </div>
+  <p class="sortnote" id="note" role="status">Loading the list…</p>
+
+  <div class="grid" id="grid"></div>
+
+  <section class="gate" id="gate" hidden>
+    <form id="gateform">
+      <h3 class="emptyh">This desk is private</h3>
+      <p class="emptyp" id="gatemsg">Enter the desk key to see the list. This browser will remember it.</p>
+      <div class="gaterow">
+        <label class="sr" for="gatekey">Desk key</label>
+        <input id="gatekey" type="password" autocomplete="current-password" required>
+        <button class="btn open" type="submit">Unlock</button>
+      </div>
+    </form>
+  </section>
+
+  <footer>
+    The list lives in the desk's own database and sits behind the desk key. Nothing here is indexed.
+    <button class="linkbtn" type="button" id="lock">Forget the key on this browser</button>
+  </footer>
+</div>
+
+<div class="dock" id="dock" hidden aria-live="polite">
+  <div class="dock-in">
+    <div class="dock-txt">
+      <p class="dock-name" id="dock-name">&nbsp;</p>
+      <code class="dock-url mono" id="dock-url">&nbsp;</code>
+    </div>
+    <button class="dock-btn" type="button" id="dock-copy">Copy</button>
+    <a class="dock-btn dock-open" id="dock-open" href="#" target="_blank" rel="noopener">Open</a>
+  </div>
+</div>
+
+<dialog class="editor" id="editor" aria-labelledby="ed-title">
+  <form id="edform" novalidate>
+    <h3 id="ed-title">Add a site</h3>
+    <label class="field"><span>Client name</span>
+      <input name="name" required maxlength="120" autocomplete="off"></label>
+    <label class="field"><span>Live domain</span>
+      <input name="live_domain" placeholder="example.com" autocomplete="off" spellcheck="false" inputmode="url"></label>
+    <label class="field"><span>Staging domain</span>
+      <input name="staging_domain" placeholder="staging.example.com" autocomplete="off" spellcheck="false" inputmode="url"></label>
+    <label class="field"><span>GitHub repo</span>
+      <input name="github_repo" placeholder="owner/repo or its GitHub link" autocomplete="off" spellcheck="false"></label>
+    <div class="edgrid">
+      <label class="field"><span>Live site runs on</span>
+        <select name="live_platform">
+          <option value="">Not set</option><option value="astro">Astro</option><option value="wordpress">WordPress</option>
+          <option value="other">Other</option><option value="none">Not live yet</option>
+        </select></label>
+      <label class="field"><span>Astro staging</span>
+        <select name="astro_staging"><option value="">Not set</option><option value="1">Yes</option><option value="0">No</option></select></label>
+      <label class="field"><span>Domain</span>
+        <select name="domain_ours"><option value="">Not set</option><option value="1">Ours</option><option value="0">The client's</option></select></label>
+      <label class="field"><span>SEO / PPC optimization</span>
+        <select name="needs_seo_ppc"><option value="">Not set</option><option value="1">Needed</option><option value="0">Not needed</option></select></label>
+    </div>
+    <label class="field"><span>Notes</span>
+      <textarea name="notes" rows="3" maxlength="2000"></textarea></label>
+    <p class="ederr" id="ederr" role="alert" hidden></p>
+    <div class="edbtns">
+      <button class="btn" type="button" id="ed-cancel">Cancel</button>
+      <button class="btn open" type="submit" id="ed-save">Save</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>

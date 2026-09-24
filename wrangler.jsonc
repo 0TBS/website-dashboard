@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "website-dashboard",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  // No database_id: `wrangler deploy` creates the database on first deploy and
+  // binds it. The table itself is made by the Worker on first use.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "website-dashboard" }
+  ],
+  "observability": { "enabled": true }
+}
