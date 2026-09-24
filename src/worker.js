@@ -1,14 +1,21 @@
 // The desk's only server code. The page itself is a static file served from
 // public/ before this runs; the Worker answers /api/* alone (see
-// run_worker_first in wrangler.jsonc) and keeps the list in D1.
+// run_worker_first in wrangler.jsonc).
+//
+// The list lives in one Durable Object with its own SQLite database, not in
+// D1: the account is at the Workers Free plan's limit of ten D1 databases,
+// every one of them holding a client site's forms or blog. A single object is
+// also the simplest thing that is strongly consistent — every read and write
+// goes through the same instance, so two people saving at once cannot lose
+// each other's change.
 
+import { DurableObject } from 'cloudflare:workers';
 import { cleanSite, toJson, InvalidField, FLAGS } from './sites.js';
 
 const COLUMNS = ['name', 'live_domain', 'staging_domain', 'github_repo', 'live_platform', ...FLAGS, 'notes'];
 
-// The table is made on first use rather than by a migration step, so a fresh
-// deploy works with nothing to run by hand. Memoised per isolate: after the
-// first request it costs nothing.
+// Made when the object first starts rather than by a migration step, so a
+// fresh deploy works with nothing to run by hand.
 const SCHEMA = `CREATE TABLE IF NOT EXISTS sites (
   id             TEXT PRIMARY KEY,
   name           TEXT NOT NULL,
@@ -23,11 +30,57 @@ const SCHEMA = `CREATE TABLE IF NOT EXISTS sites (
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
 )`;
-let ready = null;
-function ensureSchema(db) {
-  if (!ready) ready = db.prepare(SCHEMA).run().catch((e) => { ready = null; throw e; });
-  return ready;
+
+// Fields reaching these methods have already been through cleanSite() in the
+// Worker, so the object only stores and reads. Not found is null, not an
+// error: errors lose their class crossing the RPC boundary.
+export class Desk extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.sql.exec(SCHEMA);
+  }
+
+  list() {
+    return this.sql.exec('SELECT * FROM sites ORDER BY name COLLATE NOCASE').toArray().map(toJson);
+  }
+
+  read(id) {
+    const rows = this.sql.exec('SELECT * FROM sites WHERE id = ?', id).toArray();
+    return rows.length ? toJson(rows[0]) : null;
+  }
+
+  create(fields) {
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const values = COLUMNS.map((c) => (c in fields ? fields[c] : null));
+    this.sql.exec(
+      `INSERT INTO sites (id, ${COLUMNS.join(', ')}, created_at, updated_at)
+       VALUES (?, ${COLUMNS.map(() => '?').join(', ')}, ?, ?)`,
+      id, ...values, now, now
+    );
+    return this.read(id);
+  }
+
+  update(id, fields) {
+    const keys = Object.keys(fields).filter((k) => COLUMNS.includes(k));
+    if (!this.read(id)) return null;
+    this.sql.exec(
+      `UPDATE sites SET ${keys.map((k) => k + ' = ?').join(', ')}, updated_at = ? WHERE id = ?`,
+      ...keys.map((k) => fields[k]), new Date().toISOString(), id
+    );
+    return this.read(id);
+  }
+
+  remove(id) {
+    if (!this.read(id)) return false;
+    this.sql.exec('DELETE FROM sites WHERE id = ?', id);
+    return true;
+  }
 }
+
+// The one instance, placed in eastern North America, near the team.
+const desk = (env) => env.DESK.get(env.DESK.idFromName('desk'), { locationHint: 'enam' });
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -59,45 +112,7 @@ async function readBody(request) {
   try { return await request.json(); } catch { throw new InvalidField(null, 'Body is not valid JSON.'); }
 }
 
-async function getSite(db, id) {
-  const row = await db.prepare('SELECT * FROM sites WHERE id = ?').bind(id).first();
-  return row ? toJson(row) : null;
-}
-
-async function listSites(db) {
-  const { results } = await db.prepare('SELECT * FROM sites ORDER BY name COLLATE NOCASE').all();
-  return json({ sites: results.map(toJson) });
-}
-
-async function createSite(db, request) {
-  const fields = cleanSite(await readBody(request), { creating: true });
-  const now = new Date().toISOString();
-  const id = crypto.randomUUID();
-  const values = COLUMNS.map((c) => (c in fields ? fields[c] : null));
-  await db.prepare(
-    `INSERT INTO sites (id, ${COLUMNS.join(', ')}, created_at, updated_at)
-     VALUES (?, ${COLUMNS.map(() => '?').join(', ')}, ?, ?)`
-  ).bind(id, ...values, now, now).run();
-  return json({ site: await getSite(db, id) }, 201);
-}
-
-async function updateSite(db, request, id) {
-  const fields = cleanSite(await readBody(request));
-  const keys = Object.keys(fields);
-  if (!keys.length) throw new InvalidField(null, 'Nothing to change.');
-  const now = new Date().toISOString();
-  const res = await db.prepare(
-    `UPDATE sites SET ${keys.map((k) => k + ' = ?').join(', ')}, updated_at = ? WHERE id = ?`
-  ).bind(...keys.map((k) => fields[k]), now, id).run();
-  if (!res.meta.changes) return json({ error: 'No site with that id.' }, 404);
-  return json({ site: await getSite(db, id) });
-}
-
-async function deleteSite(db, id) {
-  const res = await db.prepare('DELETE FROM sites WHERE id = ?').bind(id).run();
-  if (!res.meta.changes) return json({ error: 'No site with that id.' }, 404);
-  return json({ deleted: id });
-}
+const notFound = () => json({ error: 'No site with that id.' }, 404);
 
 async function handleApi(request, env, url) {
   if (!(await authorised(request, env))) {
@@ -105,7 +120,6 @@ async function handleApi(request, env, url) {
       ? json({ error: 'Wrong or missing desk key.', code: 'bad-key' }, 401)
       : json({ error: 'DASH_KEY is not set on this Worker.', code: 'no-key-configured' }, 401);
   }
-  await ensureSchema(env.DB);
 
   const parts = url.pathname.replace(/\/+$/, '').split('/'); // ['', 'api', 'sites', id?]
   if (parts[2] !== 'sites' || parts.length > 4) return json({ error: 'Not found.' }, 404);
@@ -113,10 +127,20 @@ async function handleApi(request, env, url) {
   const m = request.method;
 
   try {
-    if (!id && m === 'GET') return await listSites(env.DB);
-    if (!id && m === 'POST') return await createSite(env.DB, request);
-    if (id && m === 'PATCH') return await updateSite(env.DB, request, id);
-    if (id && m === 'DELETE') return await deleteSite(env.DB, id);
+    if (!id && m === 'GET') return json({ sites: await desk(env).list() });
+    if (!id && m === 'POST') {
+      const fields = cleanSite(await readBody(request), { creating: true });
+      return json({ site: await desk(env).create(fields) }, 201);
+    }
+    if (id && m === 'PATCH') {
+      const fields = cleanSite(await readBody(request));
+      if (!Object.keys(fields).length) throw new InvalidField(null, 'Nothing to change.');
+      const site = await desk(env).update(id, fields);
+      return site ? json({ site }) : notFound();
+    }
+    if (id && m === 'DELETE') {
+      return (await desk(env).remove(id)) ? json({ deleted: id }) : notFound();
+    }
     return json({ error: 'Method not allowed.' }, 405);
   } catch (e) {
     if (e instanceof InvalidField) return json({ error: e.message, field: e.field }, 400);

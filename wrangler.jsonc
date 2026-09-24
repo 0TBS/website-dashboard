@@ -2,16 +2,24 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "website-dashboard",
   "main": "src/worker.js",
-  "compatibility_date": "2026-09-01",
+  "compatibility_date": "2026-09-24",
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*"],
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash"
   },
-  // No database_id: `wrangler deploy` creates the database on first deploy and
-  // binds it. The table itself is made by the Worker on first use.
-  "d1_databases": [
-    { "binding": "DB", "database_name": "website-dashboard" }
-  ],
+  // The list: one SQLite-backed Durable Object (see src/worker.js for why it
+  // is not D1). Free on the Workers Free plan.
+  "durable_objects": {
+    "bindings": [{ "name": "DESK", "class_name": "Desk" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Desk"] }],
+  // The desk has one address. The workers.dev and preview URLs would be
+  // second, unlisted copies of it, so both are off.
+  "routes": [{ "pattern": "website.10xid.com", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false,
   "observability": { "enabled": true }
 }

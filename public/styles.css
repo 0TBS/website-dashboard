@@ -262,6 +262,8 @@ a.val:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radiu
 .emptyh{margin:0 0 8px;font-size:16px;font-weight:700;color:var(--ink)}
 .emptyp{margin:0;font-size:14px;line-height:1.55;color:var(--faint)}
 .empty .addbtn,.empty .btn{margin-top:14px}
+.empty.lost{margin-top:22px}
+a.addbtn{display:inline-block;text-decoration:none}
 .gaterow{display:flex;gap:8px;margin-top:14px;max-width:420px}
 .gaterow input{flex:1 1 auto;min-width:0;font-size:14.5px;padding:8px 12px;border-radius:8px;
   border:1px solid var(--line-firm);background:var(--paper);color:var(--ink)}

@@ -2,6 +2,8 @@
 
 One page listing every client website, with where each one stands. It is built in the same style as the 10XiD Preview Desk (preview.10xid.com/desk/).
 
+**Live at https://website.10xid.com**
+
 For each site the desk shows, and lets anyone with the key change:
 
 | Field | Answers |
@@ -22,7 +24,7 @@ Changes save as soon as you make them, and everyone sees the same list. When you
 ## How it is built
 
 - **Cloudflare Worker** (`src/worker.js`) serves the page from `public/` and answers `/api/sites`.
-- **D1 database** (`DB` binding) holds the list: one table, `sites`. The Worker creates the table the first time it is used, so there is no migration step.
+- **A Durable Object with SQLite** (`DESK` binding, class `Desk`) holds the list: one table, `sites`, inside one object placed in eastern North America. The table is created the first time the object starts, so there is no migration step. It is not D1 because this Cloudflare account is at the Free plan's limit of 10 D1 databases, all used by client sites. A single object is also strongly consistent: every write goes through one place, so two people saving at the same moment cannot overwrite each other's change.
 - **`src/sites.js`** is the one place that defines a site record: its fields, what each one may hold, and how input is cleaned. For example, `https://www.Example.com/` becomes `www.example.com`, and a GitHub link becomes `owner/repo`.
 - **The page** is plain HTML, CSS and JS in `public/`, with no framework and no build step.
 - **Privacy**: the list sits behind a shared desk key (`DASH_KEY`). With no key set, nobody can get in: the desk refuses every request rather than showing the list openly. `public/_headers` sends `X-Robots-Tag: noindex` and a strict Content-Security-Policy.
@@ -36,19 +38,29 @@ npm run dev                         # http://127.0.0.1:8787, enter local-dev-key
 npm test                            # unit tests for the field rules
 ```
 
-Local runs use a local copy of D1 inside `.wrangler/`. It never touches the real database.
+Local runs keep their own copy of the data inside `.wrangler/`. They never touch the live list.
 
 ## Deploy (Cloudflare Workers)
 
-1. In the Cloudflare dashboard, go to **Workers & Pages → Create → Import a repository**, choose `0TBS/website-dashboard` and keep the deploy command `npx wrangler deploy`. On the first deploy, Wrangler creates the `website-dashboard` D1 database and binds it.
-2. Set the desk key as a secret. Use a long random value, for example from `openssl rand -hex 24`:
-   ```sh
-   npx wrangler secret put DASH_KEY
-   ```
-3. Optionally, attach a custom hostname under **Settings → Domains & Routes**.
-4. Open the desk, enter the key once per browser, and add sites.
+The Worker `website-dashboard` runs on the Cloudflare account that holds the 10xid.com zone. Everything about where it lives is in `wrangler.jsonc`:
 
-To let someone in, share the key. To lock everyone out, rotate it: run `wrangler secret put DASH_KEY` again with a new value.
+- **Custom domain:** `website.10xid.com`. Cloudflare created the DNS record and certificate. It overrides the proxied `*.10xid.com` wildcard for this one hostname.
+- **workers.dev and preview URLs:** off. The desk has only one address.
+- **Desk key:** stored as a Worker secret named `DASH_KEY`. It is not a build variable.
+
+To redeploy after a change, run:
+
+```sh
+npx wrangler deploy
+```
+
+This needs a Cloudflare API token that can edit Workers on that account.
+
+To let someone in, share the key. To lock everyone out, rotate it by setting a new value:
+
+```sh
+openssl rand -hex 24 | npx wrangler secret put DASH_KEY
+```
 
 ## API
 
