@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cloudflare, CfError, isConflict, isNotFound } from '../src/cloudflare.js';
-import { createFakeCloudflare, createFakeSites } from './fake-cloudflare.js';
+import { budget, countedFetch, BudgetError } from '../src/budget.js';
+import { createFakeCloudflare, createFakeSites, createFakeDoh, combineFetches } from './fake-cloudflare.js';
 
 const TOKEN = 'tok-5ecret-never-shown';
 const ACCOUNT = 'acc00000000000000000000000000001';
@@ -62,6 +63,8 @@ test('every call carries the token in the Authorization header and nowhere else,
   });
   const zone = await cf.findZone('www.example.com');
   const [rec] = await cf.listDnsRecords(zone.id, 'example.com');
+  await cf.listZoneRecords(zone.id);
+  await cf.listWorkerRoutes(zone.id);
   await cf.deleteDnsRecord(zone.id, rec.id);
   const domain = await cf.attachCustomDomain({ hostname: 'example.com', service: 'staging-acme', zone_id: zone.id });
   await cf.listCustomDomains({ zone_id: zone.id });
@@ -73,7 +76,7 @@ test('every call carries the token in the Authorization header and nowhere else,
   await cf.detachCustomDomain(domain.id);
   await cf.createDnsRecord(zone.id, rec);
 
-  assert.ok(fake.calls.length >= 14);
+  assert.ok(fake.calls.length >= 16);
   for (const c of fake.calls) {
     const where = `${c.method} ${c.path}`;
     assert.ok(c.url.startsWith(API + '/'), where);
@@ -100,6 +103,13 @@ test('each method calls the documented URL with the documented query', async () 
   await cf.listDnsRecords(ZONE, 'WWW.example.com');
   assert.deepEqual([last().method, last().path, last().query],
     ['GET', `/zones/${ZONE}/dns_records`, { name: 'www.example.com', per_page: '100' }]);
+
+  await cf.listZoneRecords(ZONE);
+  assert.deepEqual([last().method, last().path, last().query],
+    ['GET', `/zones/${ZONE}/dns_records`, { per_page: '5000' }]);
+
+  await cf.listWorkerRoutes(ZONE);
+  assert.deepEqual([last().method, last().path, last().query], ['GET', `/zones/${ZONE}/workers/routes`, {}]);
 
   await cf.listCustomDomains({ hostname: 'staging.example.com' });
   assert.deepEqual([last().method, last().path, last().query],
@@ -197,8 +207,10 @@ test('DELETE dns_records answers with only { result: { id } }, and that counts a
 
 test('findZone walks up the hostname to the zone our account holds', async () => {
   const { fake, cf } = setup({ zones: [{ id: 'z-uk', name: 'example.co.uk' }] });
-  assert.deepEqual(await cf.findZone('www.example.co.uk'),
-    { id: 'z-uk', name: 'example.co.uk', status: 'active', paused: false });
+  assert.deepEqual(await cf.findZone('www.example.co.uk'), {
+    id: 'z-uk', name: 'example.co.uk', status: 'active', paused: false,
+    type: 'full', plan: 'free', name_servers: ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'],
+  });
   assert.deepEqual(fake.calls.map((c) => c.query.name), ['www.example.co.uk', 'example.co.uk']);
 
   fake.calls.length = 0;
@@ -226,6 +238,34 @@ test('findZone does not take a zone whose name only looks close', async () => {
   assert.equal(await cf.findZone('example.com'), null);
 });
 
+test('findZone also says what kind of zone it is, its plan and the nameservers Cloudflare assigned', async () => {
+  const { cf } = setup({ zones: [
+    { id: 'z1', name: 'pro.com', plan: 'pro', name_servers: ['Ada.NS.Cloudflare.com.', 'bob.ns.cloudflare.com'] },
+    { id: 'z2', name: 'partial.com', type: 'partial', plan: 'business' },
+    { id: 'z3', name: 'custom.com', plan: { id: 'p', name: 'Some Contract Plan' } },
+    { id: 'z4', name: 'noplan.com', plan: null },
+  ] });
+  const pro = await cf.findZone('www.pro.com');
+  assert.equal(pro.type, 'full');
+  assert.equal(pro.plan, 'pro');
+  assert.deepEqual(pro.name_servers, ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'lower case, no trailing dot');
+  const partial = await cf.findZone('partial.com');
+  assert.deepEqual([partial.type, partial.plan], ['partial', 'business']);
+  assert.equal((await cf.findZone('custom.com')).plan, 'Some Contract Plan', 'no legacy id: the plan keeps its own name');
+  assert.equal((await cf.findZone('noplan.com')).plan, null);
+});
+
+test('findZone copes with a zone that leaves out its type, plan or nameservers', async () => {
+  const { cf } = scripted(
+    { body: { success: true, result: [{ id: 'z', name: 'example.com', status: 'active', plan: { legacy_id: 'Enterprise', name: 'Enterprise Website' } }] } },
+    { body: { success: true, result: [{ id: 'z', name: 'example.com', status: 'pending', name_servers: 'not a list' }] } },
+  );
+  assert.deepEqual(await cf.findZone('example.com'),
+    { id: 'z', name: 'example.com', status: 'active', paused: false, type: null, plan: 'enterprise', name_servers: [] });
+  const odd = await cf.findZone('example.com');
+  assert.deepEqual([odd.plan, odd.name_servers], [null, []]);
+});
+
 test('DNS listing keeps only records named exactly the host, whatever the server sends', async () => {
   const records = ['www.example.com', 'WWW.Example.com', 'xwww.example.com', 'example.com', 'a.www.example.com']
     .map((name, i) => ({ id: 'r' + i, type: 'A', name, content: '192.0.2.' + i }));
@@ -242,10 +282,137 @@ test('DNS listing follows every page', async () => {
   assert.deepEqual(fake.calls.map((c) => c.query.page), [undefined, '2']);
 });
 
+test('the whole zone is listed 5,000 records a page, every name and type', async () => {
+  const many = Array.from({ length: 5001 }, (_, i) => ({ type: 'A', name: `h${i}.example.com`, content: '192.0.2.1' }));
+  const { fake, cf } = setup({
+    records: [...many,
+      { type: 'MX', name: 'example.com', content: 'mx.example.net', priority: 10 },
+      { type: 'TXT', name: 'example.com', content: 'v=spf1 -all' }],
+    domains: [{ hostname: 'example.com', service: 'acme' }],
+  });
+  const list = await cf.listZoneRecords(ZONE);
+  assert.equal(list.length, 5004);
+  assert.equal(new Set(list.map((r) => r.id)).size, 5004);
+  assert.deepEqual(fake.calls.map((c) => c.query), [{ per_page: '5000' }, { per_page: '5000', page: '2' }]);
+  assert.deepEqual(list.filter((r) => r.name === 'example.com').map((r) => r.type).sort(), ['AAAA', 'MX', 'TXT']);
+  assert.ok(list.find((r) => r.type === 'AAAA').meta.read_only, 'the Worker record comes as Cloudflare lists it');
+});
+
+const page = (n, of, result = [{ id: 'r' + n }]) => ({ body: { success: true, result, result_info: { page: n, total_pages: of } } });
+
+test('the zone listing follows total_pages, up to twenty pages', async () => {
+  const { cf, seen } = scripted(page(1, 3), page(2, 3), page(3, 3));
+  assert.deepEqual((await cf.listZoneRecords(ZONE)).map((r) => r.id), ['r1', 'r2', 'r3']);
+  assert.deepEqual(seen.map((s) => new URL(s.url).searchParams.get('page')), [null, '2', '3']);
+
+  const empty = scripted({ body: { success: true, result: null } });
+  assert.deepEqual(await empty.cf.listZoneRecords(ZONE), [], 'no result_info and no result is an empty zone');
+
+  const twenty = scripted(...Array.from({ length: 20 }, (_, i) => page(i + 1, 20)));
+  assert.equal((await twenty.cf.listZoneRecords(ZONE)).length, 20);
+});
+
+test('a listing stops at an empty page, and a zone of more than twenty pages is refused after the first', async () => {
+  // One odd answer must not spend every call the request has.
+  const b = budget();
+  const odd = async () => Response.json({ success: true, result: [], result_info: { page: 1, total_pages: 1e9 } });
+  const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: countedFetch(odd, b) });
+  assert.deepEqual(await cf.listZoneRecords(ZONE), []);
+  assert.equal(b.used, 1);
+
+  const short = scripted(page(1, 3), page(2, 3, []), page(3, 3));
+  assert.deepEqual((await short.cf.listZoneRecords(ZONE)).map((r) => r.id), ['r1']);
+  assert.equal(short.seen.length, 2, 'the empty second page ends it');
+
+  const huge = scripted(page(1, 21), page(2, 21));
+  await rejects(huge.cf.listZoneRecords(ZONE), (e) => {
+    assert.equal(e.status, 0);
+    assert.match(e.message, /too large to read in one go/);
+  });
+  assert.equal(huge.seen.length, 1);
+  const host = scripted(page(1, 1e9));
+  await rejects(host.cf.listDnsRecords(ZONE, 'example.com'), (e) => assert.match(e.message, /too large to read in one go/));
+});
+
+// An id goes into a URL path. new URL() takes '..' (and %2e%2e) as a step
+// up, so a rule id of '..' would turn "delete this rule" into a call on the
+// whole ruleset, and a domain id could reach any path in the account.
+test('an id that is not a plain id is refused before anything is sent', async () => {
+  const sent = [];
+  const fetchImpl = async (url, init) => {
+    sent.push(`${init.method} ${new URL(url).pathname}`);
+    return Response.json({ success: true, result: [] });
+  };
+  const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl });
+  const rec = { type: 'A', name: 'example.com', content: '192.0.2.1', ttl: 1 };
+  const odd = ['..', '.', '%2e%2e', '../scripts/website-dashboard', 'abc?x=1', 'a/b', 'a b', '', 'x'.repeat(65), 'é', undefined, null, 42];
+  for (const id of odd) {
+    const refused = (e) => {
+      assert.equal(e.status, 0);
+      assert.deepEqual(e.codes, []);
+      assert.equal(e.message, `Refused an odd id from Cloudflare: ${id}.`);
+    };
+    for (const attempt of [
+      () => cf.deleteRedirectRule(ZONE, 'rs1', id),
+      () => cf.deleteRedirectRule(ZONE, id, 'r1'),
+      () => cf.deleteRedirectRule(id, 'rs1', 'r1'),
+      () => cf.detachCustomDomain(id),
+      () => cf.deleteDnsRecord(ZONE, id),
+      () => cf.deleteDnsRecord(id, 'd1'),
+      () => cf.createDnsRecord(id, rec),
+      () => cf.listDnsRecords(id, 'example.com'),
+      () => cf.listZoneRecords(id),
+      () => cf.listWorkerRoutes(id),
+      () => cf.getSslMode(id),
+      () => cf.getRedirectEntrypoint(id),
+      () => cf.findRedirectRules(id, 'desk-1'),
+      () => cf.addRedirectRule(id, redirectRule('desk-1')),
+      () => cf.listSecretNames(id),
+    ]) await rejects(attempt(), refused);
+  }
+  for (const script of ['-acme', '_acme', 'a'.repeat(64), 'acme.old']) {
+    await rejects(cf.listSecretNames(script), (e) => assert.equal(e.message, `Refused an odd id from Cloudflare: ${script}.`));
+  }
+  assert.deepEqual(sent, []);
+
+  // Ids as Cloudflare makes them pass: 32 or 40 hex characters, and names.
+  await cf.detachCustomDomain('c'.repeat(40));
+  await cf.listSecretNames('staging-acme_2');
+  await cf.deleteRedirectRule(ZONE, 'a'.repeat(32), 'b'.repeat(64));
+  assert.equal(sent.length, 3);
+});
+
+test('a ruleset id in Cloudflare\'s own answer is checked too, before the rule is sent to it', async () => {
+  const { cf, seen } = scripted({ body: { success: true, result: { id: '..', rules: [] } } });
+  await rejects(cf.addRedirectRule(ZONE, redirectRule('desk-1')), (e) => assert.match(e.message, /^Refused an odd id from Cloudflare: \.\.\.$/));
+  assert.equal(seen.length, 1, 'only the look');
+});
+
+test('Worker routes are listed for one zone, as id, pattern and script', async () => {
+  const { fake, cf } = setup({
+    zones: [{ id: ZONE, name: 'example.com' }, { id: 'z2', name: 'other.com' }],
+    routes: [
+      { id: 'rt1', pattern: 'example.com/*', script: 'old-site' },
+      { id: 'rt2', pattern: '*.example.com/blog/*' },
+      { id: 'rt3', pattern: 'other.com/*', script: 'other' },
+    ],
+  });
+  assert.deepEqual(await cf.listWorkerRoutes(ZONE), [
+    { id: 'rt1', pattern: 'example.com/*', script: 'old-site' },
+    { id: 'rt2', pattern: '*.example.com/blog/*', script: null },
+  ]);
+  assert.deepEqual(await cf.listWorkerRoutes('z2'), [{ id: 'rt3', pattern: 'other.com/*', script: 'other' }]);
+  assert.ok(fake.state.workers.has('old-site'), 'a route\'s Worker exists');
+  assert.throws(() => createFakeCloudflare({ routes: [{ pattern: 'nowhere.com/*', script: 'x' }] }), /no zone for route/);
+
+  const extra = scripted({ body: { success: true, result: [{ id: 'r', pattern: 'a.example.com/*', script: 's', request_limit_fail_open: true }] } });
+  assert.deepEqual(await extra.cf.listWorkerRoutes(ZONE), [{ id: 'r', pattern: 'a.example.com/*', script: 's' }]);
+});
+
 test('recreating a record sends only the fields it is made from, never the read-only ones', async () => {
   const { fake, cf } = setup({ records: [{
     type: 'A', name: 'old.example.com', content: '192.0.2.10', proxied: false, ttl: 3600,
-    comment: 'Old host', tags: ['owner:tbox'], settings: { ipv4_only: true }, private_routing: true,
+    comment: 'Old host', tags: ['owner:tbox'], private_routing: true,
   }] });
   const [rec] = await cf.listDnsRecords(ZONE, 'old.example.com');
   for (const k of ['id', 'proxiable', 'created_on', 'modified_on', 'meta', 'comment_modified_on', 'tags_modified_on']) {
@@ -255,7 +422,7 @@ test('recreating a record sends only the fields it is made from, never the read-
   const made = await cf.createDnsRecord(ZONE, rec);
   assert.deepEqual(fake.calls.at(-1).body, {
     type: 'A', name: 'old.example.com', content: '192.0.2.10', ttl: 3600, proxied: false,
-    comment: 'Old host', tags: ['owner:tbox'], settings: { ipv4_only: true }, private_routing: true,
+    comment: 'Old host', tags: ['owner:tbox'], private_routing: true,
   });
   assert.notEqual(made.id, rec.id, 'Cloudflare gives it a new id');
   for (const k of ['type', 'name', 'content', 'ttl', 'proxied', 'comment', 'tags', 'settings', 'private_routing']) {
@@ -272,6 +439,43 @@ test('empty comment, tags and settings, and private_routing false, are left out'
   });
   assert.deepEqual(fake.calls.at(-1).body,
     { type: 'CNAME', name: 'www.example.com', content: 'host.example.net', ttl: 1, proxied: true });
+});
+
+test('a recreated record carries only the settings that are on, and only where they apply', async () => {
+  const { fake, cf } = setup();
+  const cases = [
+    // [record, the settings sent]
+    [{ type: 'CNAME', proxied: true, settings: { flatten_cname: false } }, undefined],
+    [{ type: 'CNAME', proxied: true, settings: { flatten_cname: true, ipv4_only: true } }, { ipv4_only: true }],
+    [{ type: 'CNAME', proxied: false, settings: { flatten_cname: true, ipv6_only: true } }, { flatten_cname: true }],
+    [{ type: 'A', proxied: false, settings: { ipv4_only: false, ipv6_only: false } }, undefined],
+    [{ type: 'A', proxied: false, settings: { ipv4_only: true } }, undefined],
+    [{ type: 'A', settings: { ipv6_only: true } }, undefined],
+    [{ type: 'A', proxied: true, settings: { ipv4_only: true, ipv6_only: false } }, { ipv4_only: true }],
+    [{ type: 'AAAA', proxied: true, settings: { ipv6_only: true } }, { ipv6_only: true }],
+    [{ type: 'A', proxied: true, settings: { ipv4_only: 'yes' } }, undefined],
+    [{ type: 'A', proxied: true, settings: null }, undefined],
+    [{ type: 'A', proxied: true, settings: 'ipv4_only' }, undefined],
+  ];
+  for (const [i, [rec, sent]] of cases.entries()) {
+    const content = { CNAME: `host${i}.example.net`, A: `192.0.2.${i}`, AAAA: `2001:db8::${i}` }[rec.type];
+    // The fake refuses a setting where it does not apply, so each create
+    // passing is the proof.
+    await cf.createDnsRecord(ZONE, { ...rec, name: `r${i}.example.com`, content, ttl: 1 });
+    assert.deepEqual(fake.calls.at(-1).body.settings, sent, JSON.stringify(rec));
+  }
+});
+
+test('a proxied CNAME listed with flatten_cname off goes back without it', async () => {
+  const { cf } = setup({ records: [
+    { type: 'CNAME', name: 'www.example.com', content: 'host.example.net', proxied: true, settings: { flatten_cname: false } },
+    { type: 'A', name: 'ftp.example.com', content: '192.0.2.7', settings: { ipv4_only: false, ipv6_only: false } },
+  ] });
+  for (const rec of await cf.listZoneRecords(ZONE)) {
+    await cf.deleteDnsRecord(ZONE, rec.id);
+    const made = await cf.createDnsRecord(ZONE, rec);
+    assert.deepEqual([made.type, made.name, made.content, made.proxied], [rec.type, rec.name, rec.content, rec.proxied]);
+  }
 });
 
 test('the redirect entry point is null until the zone has one; other errors still throw', async () => {
@@ -318,12 +522,11 @@ test('the new rule is found by its ref, wherever it sits in the answer', async (
   assert.deepEqual(await cf.addRedirectRule(ZONE, redirectRule('desk-1')), { ruleset_id: 'rs1', rule_id: 'r-new', ref: 'desk-1' });
 });
 
-test('an answer without the new rule is an error, not a guess', async () => {
-  const { cf } = scripted(
-    { body: { success: true, result: { id: 'rs1', rules: [] } } },
-    { body: { success: true, result: { id: 'rs1', rules: [{ id: 'r-theirs', ref: 'theirs' }] } } },
-  );
+test('an answer without the new rule is an error, not a guess, once a fresh look does not show it either', async () => {
+  const theirs = { body: { success: true, result: { id: 'rs1', rules: [{ id: 'r-theirs', ref: 'theirs' }] } } };
+  const { cf, seen } = scripted({ body: { success: true, result: { id: 'rs1', rules: [] } } }, theirs, theirs);
   await assert.rejects(cf.addRedirectRule(ZONE, redirectRule('desk-1')), /desk-1 was not in Cloudflare's answer/);
+  assert.deepEqual(seen.map((s) => s.init.method), ['GET', 'POST', 'GET']);
 });
 
 test('if the entry point appears between the look and the create, the rule is added to it', async () => {
@@ -350,6 +553,65 @@ test('a create that fails for its own reason reports that reason', async () => {
     assert.deepEqual(e.codes, [10000]);
   });
   assert.deepEqual(fake.calls.map((c) => c.method), ['GET', 'POST', 'GET']);
+
+  // The same for an added rule: one look after the failure, then its reason.
+  const later = setup({ rulesets: [{ zone_id: ZONE, id: 'rs1', rules: [otherRule('theirs')] }] });
+  later.fake.failOn('POST', `/zones/${ZONE}/rulesets/rs1/rules`, { status: 400, codes: [20021], message: 'too many rules' });
+  await rejects(later.cf.addRedirectRule(ZONE, redirectRule('desk-1')), (e) => assert.deepEqual(e.codes, [20021]));
+  assert.deepEqual(later.fake.calls.map((c) => c.method), ['GET', 'POST', 'GET']);
+  // If that look cannot be had either, the POST's own error still says why.
+  let looks = 0;
+  const blind = async (url, init) => (init.method === 'GET' && ++looks > 1
+    ? Response.json({ success: false, errors: [{ code: 10001, message: 'Look failed.' }] }, { status: 503 })
+    : later.fake.fetch(url, init));
+  const unseeing = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: blind });
+  await rejects(unseeing.addRedirectRule(ZONE, redirectRule('desk-1')), (e) => assert.deepEqual(e.codes, [20021]));
+  assert.equal(looks, 2);
+});
+
+// Cloudflare made the rule, but its answer never came (a timeout near the
+// run's deadline, a dropped connection). Asking again by ref finds it, so
+// the desk can record it, and there is never a second rule with that ref.
+test('a redirect rule whose answer was lost is found by its ref, never added twice', async () => {
+  for (const rulesets of [[], [{ zone_id: ZONE, id: 'rs1', rules: [otherRule('theirs')] }]]) {
+    const { fake } = setup({ rulesets });
+    let drop = true;
+    const lossy = async (url, init) => {
+      const res = await fake.fetch(url, init);
+      if (drop && init.method === 'POST') {
+        drop = false;
+        const e = new Error('The operation was aborted due to timeout');
+        e.name = 'TimeoutError';
+        throw e;
+      }
+      return res;
+    };
+    const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: lossy });
+    const added = await cf.addRedirectRule(ZONE, redirectRule('desk-1'));
+    const ours = fake.redirectRules(ZONE).filter((r) => r.ref === 'desk-1');
+    assert.equal(ours.length, 1);
+    assert.deepEqual(added, { ruleset_id: fake.state.rulesets[0].id, rule_id: ours[0].id, ref: 'desk-1' });
+    assert.deepEqual(fake.calls.map((c) => c.method), ['GET', 'POST', 'GET'], 'one POST, then a look');
+
+    // Asked again, it answers the same rule and sends nothing new.
+    fake.calls.length = 0;
+    assert.deepEqual(await cf.addRedirectRule(ZONE, redirectRule('desk-1')), added);
+    assert.deepEqual(fake.calls.map((c) => c.method), ['GET']);
+    assert.equal(fake.redirectRules(ZONE).filter((r) => r.ref === 'desk-1').length, 1);
+  }
+});
+
+test('a failed POST whose rule did land anyway answers that rule', async () => {
+  const { fake, cf } = setup({ rulesets: [{ zone_id: ZONE, id: 'rs1', rules: [otherRule('theirs')] }] });
+  // A 502 from the edge after Cloudflare had saved the rule.
+  const lands = (fetchImpl) => async (url, init) => {
+    const res = await fetchImpl(url, init);
+    return init.method === 'POST' ? Response.json({ success: false, errors: [{ code: 10013, message: 'Bad gateway' }] }, { status: 502 }) : res;
+  };
+  const flaky = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: lands(fake.fetch) });
+  const added = await flaky.addRedirectRule(ZONE, redirectRule('desk-1'));
+  assert.equal(added.rule_id, (await cf.findRedirectRules(ZONE, 'desk-1'))[0].rule_id);
+  assert.equal(fake.redirectRules(ZONE).length, 2);
 });
 
 test('the desk finds and removes its own rule by ref and leaves the others', async () => {
@@ -408,6 +670,130 @@ test('isConflict knows the Custom Domain and DNS record clashes; isNotFound is a
   assert.ok(!isNotFound(undefined));
 });
 
+// --- Time and calls ---
+
+// Records the wait of every timeout the client asks for, and can shorten
+// the real one, so a ten-second timeout can be seen without waiting for it.
+function spyTimeouts(t, shortenTo) {
+  const real = AbortSignal.timeout;
+  const waits = [];
+  AbortSignal.timeout = (ms) => {
+    waits.push(ms);
+    return real.call(AbortSignal, shortenTo ?? ms);
+  };
+  t.after(() => { AbortSignal.timeout = real; });
+  return waits;
+}
+
+// A fetch that never answers until its signal gives up. Node does not keep
+// itself running for a timeout alone, so the test holds a timer of its own.
+function hanging(t) {
+  const keepAlive = setTimeout(() => {}, 5000);
+  t.after(() => clearTimeout(keepAlive));
+  const seen = [];
+  const fetchImpl = (url, init) => new Promise((resolve, reject) => {
+    seen.push(url);
+    init.signal.addEventListener('abort', () => reject(init.signal.reason));
+  });
+  return { fetchImpl, seen };
+}
+
+const outOfTime = (e) => {
+  assert.equal(e.status, 0);
+  assert.deepEqual(e.codes, []);
+  assert.match(e.message, /^Ran out of time/);
+};
+
+test('at or past the deadline nothing is sent, and the error says the run ran out of time', async () => {
+  const { fake } = setup();
+  const b = budget();
+  for (const deadline of [Date.now() - 1000, Date.now()]) {
+    const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: countedFetch(fake.fetch, b), deadline });
+    await rejects(cf.getSslMode(ZONE), outOfTime);
+    await rejects(cf.listZoneRecords(ZONE), outOfTime);
+  }
+  assert.equal(fake.calls.length, 0);
+  assert.equal(b.used, 0, 'and no call is counted');
+});
+
+test('each call waits ten seconds at most, and never past the deadline', async (t) => {
+  const waits = spyTimeouts(t);
+  const { fake } = setup();
+  const client = (deadline) => cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: fake.fetch, deadline });
+  await client().getSslMode(ZONE);
+  await client(Date.now() + 60000).getSslMode(ZONE);
+  await client(Date.now() + 3000).getSslMode(ZONE);
+  await client(Date.now() + 2500.2).getSslMode(ZONE);
+  assert.deepEqual(waits.slice(0, 2), [10000, 10000]);
+  assert.ok(waits[2] > 2900 && waits[2] <= 3000, 'what is left: ' + waits[2]);
+  assert.ok(Number.isInteger(waits[3]) && waits[3] <= 2501, 'a whole number of ms, as AbortSignal.timeout needs');
+});
+
+test('a call still waiting at the deadline is cut off there', async (t) => {
+  const { fetchImpl, seen } = hanging(t);
+  const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl, deadline: Date.now() + 50 });
+  const started = Date.now();
+  await rejects(cf.getSslMode(ZONE), outOfTime);
+  assert.ok(Date.now() - started < 2000, 'at the deadline, not ten seconds later');
+  assert.equal(seen.length, 1);
+});
+
+test('the ten-second timeout, with no deadline near, is Cloudflare out of reach', async (t) => {
+  const waits = spyTimeouts(t, 20);
+  const { fetchImpl } = hanging(t);
+  const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl, deadline: Date.now() + 60000 });
+  await rejects(cf.getSslMode(ZONE), (e) => {
+    assert.equal(e.status, 0);
+    assert.match(e.message, /^Could not reach Cloudflare: .*timeout/);
+  });
+  assert.deepEqual(waits, [10000]);
+});
+
+test('the deadline also covers reading the answer', async (t) => {
+  const keepAlive = setTimeout(() => {}, 5000);
+  t.after(() => clearTimeout(keepAlive));
+  const slowBody = async (url, init) => new Response(new ReadableStream({
+    start(c) { init.signal.addEventListener('abort', () => c.error(init.signal.reason)); },
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: slowBody, deadline: Date.now() + 50 });
+  await rejects(cf.getSslMode(ZONE), outOfTime);
+});
+
+test('a run that reaches its deadline part-way stops before the next call', async () => {
+  const seen = [];
+  // The first page arrives late (after the deadline) but whole.
+  const fetchImpl = async (url) => {
+    seen.push(url);
+    await new Promise((r) => setTimeout(r, 60));
+    return Response.json({ success: true, result: [{ id: 'r1' }], result_info: { page: 1, total_pages: 2 } });
+  };
+  const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl, deadline: Date.now() + 30 });
+  await rejects(cf.listZoneRecords(ZONE), outOfTime);
+  assert.equal(seen.length, 1, 'the second page was never asked for');
+});
+
+test('a request that has used its calls gets a BudgetError, not a Cloudflare error', async () => {
+  const { fake } = setup({ records: Array.from({ length: 101 }, (_, i) => ({ type: 'A', name: 'example.com', content: '10.0.0.' + i })) });
+  const b = budget(2);
+  const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: countedFetch(fake.fetch, b) });
+  await cf.getSslMode(ZONE);
+  await cf.getSslMode(ZONE);
+  await assert.rejects(cf.getSslMode(ZONE), (e) => {
+    assert.ok(e instanceof BudgetError, 'passed up unchanged');
+    assert.ok(!(e instanceof CfError));
+    assert.equal(e.message, 'The desk has used its Cloudflare calls for this request.');
+    return true;
+  });
+  assert.equal(fake.calls.length, 2, 'the refused call never went out');
+
+  // 101 records are two pages of 100: with one call left, the listing stops
+  // after the first rather than answering with half the records.
+  fake.calls.length = 0;
+  const paging = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: countedFetch(fake.fetch, budget(1)) });
+  await assert.rejects(paging.listDnsRecords(ZONE, 'example.com'), BudgetError);
+  assert.equal(fake.calls.length, 1);
+});
+
 // --- The fake, so the go-live tests can trust it ---
 
 test('fake: a zone is found by exact name within our account', async () => {
@@ -456,6 +842,69 @@ test('fake: a CNAME cannot share a name with A, AAAA or CNAME; an A/AAAA cannot 
   await cf.createDnsRecord(ZONE, { type: 'AAAA', name: 'a.example.com', content: '2001:db8::2', ttl: 1 });
   await cf.createDnsRecord(ZONE, { type: 'TXT', name: 'c.example.com', content: 'v=spf1 -all', ttl: 1 });
   assert.equal((await cf.listDnsRecords(ZONE, 'a.example.com')).length, 3);
+});
+
+test('fake: a setting where the docs say it does not apply is refused, even set to false', async () => {
+  const { fake } = setup();
+  const post = async (rec) => {
+    const res = await fake.fetch(`${API}/zones/${ZONE}/dns_records`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer t', 'content-type': 'application/json' },
+      body: JSON.stringify({ ttl: 1, ...rec }),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+  const cname = { type: 'CNAME', name: 'c.example.com', content: 'host.example.net' };
+  const a = { type: 'A', name: 'a.example.com', content: '192.0.2.1' };
+  for (const rec of [
+    { ...cname, proxied: true, settings: { flatten_cname: true } },
+    { ...cname, proxied: true, settings: { flatten_cname: false } },
+    { ...a, proxied: false, settings: { ipv4_only: true } },
+    { ...a, settings: { ipv4_only: false } },
+    { ...a, type: 'AAAA', content: '2001:db8::1', proxied: false, settings: { ipv6_only: false } },
+    { ...cname, proxied: false, settings: { flatten_cname: true, ipv4_only: true } },
+  ]) {
+    const { status, body } = await post(rec);
+    assert.equal(status, 400, JSON.stringify(rec));
+    assert.deepEqual(body.errors[0].code, 1004);
+    assert.equal(body.errors[0].error_chain[0].code, 9041);
+  }
+  assert.equal(fake.state.records.length, 0);
+
+  for (const rec of [
+    { ...cname, proxied: false, settings: { flatten_cname: true } },
+    { ...a, proxied: true, settings: { ipv4_only: true, ipv6_only: false } },
+    { ...a, name: 'b.example.com', proxied: false, settings: {} },
+    { ...a, name: 'd.example.com' },
+  ]) {
+    assert.equal((await post(rec)).status, 200, JSON.stringify(rec));
+  }
+  assert.deepEqual(fake.recordsAt('c.example.com')[0].settings, { flatten_cname: true });
+});
+
+test('fake: zones carry a type, a plan and their assigned nameservers', async () => {
+  const { fake } = setup({ zones: [
+    { id: 'z1', name: 'example.com' },
+    { id: 'z2', name: 'pro.com', plan: 'pro', type: 'partial', name_servers: ['kim.ns.cloudflare.com', 'lee.ns.cloudflare.com'] },
+  ] });
+  const zone = async (name) => (await (await fake.fetch(`${API}/zones?name=${name}`, { headers: { authorization: 'Bearer t' } })).json()).result[0];
+  const plain = await zone('example.com');
+  assert.equal(plain.type, 'full');
+  assert.deepEqual([plain.plan.legacy_id, plain.plan.name], ['free', 'Free Website']);
+  assert.deepEqual(plain.name_servers, ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com']);
+  const pro = await zone('pro.com');
+  assert.deepEqual([pro.type, pro.plan.legacy_id, pro.plan.name], ['partial', 'pro', 'Pro Website']);
+  assert.deepEqual(pro.name_servers, ['kim.ns.cloudflare.com', 'lee.ns.cloudflare.com']);
+});
+
+test('fake: a DNS listing gives at most 5,000 records a page', async () => {
+  const { fake } = setup({ records: Array.from({ length: 5002 }, (_, i) => ({ type: 'TXT', name: `t${i}.example.com`, content: 'x' })) });
+  const list = async (q) => (await (await fake.fetch(`${API}/zones/${ZONE}/dns_records?${q}`, { headers: { authorization: 'Bearer t' } })).json());
+  const big = await list('per_page=100000');
+  assert.equal(big.result.length, 5000);
+  assert.deepEqual([big.result_info.per_page, big.result_info.total_pages, big.result_info.total_count], [5000, 2, 5002]);
+  assert.equal((await list('per_page=5000&page=2')).result.length, 2);
+  assert.equal((await list('')).result.length, 100, '100 when not asked');
 });
 
 test('fake: bad record content fails validation, with the detail in error_chain', async () => {
@@ -579,7 +1028,13 @@ test('fake: the redirect entry point is 404 until created, and only one per phas
   assert.equal(again.status, 400);
   assert.equal((await again.json()).errors[0].code, 20217);
 
-  await rejects(cf.addRedirectRule(ZONE, redirectRule('desk-1')), (e) => assert.match(e.message, /ref 'desk-1' already exists/));
+  const dup = await fake.fetch(`${API}/zones/${ZONE}/rulesets/${created.id}/rules`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer t', 'content-type': 'application/json' },
+    body: JSON.stringify(redirectRule('desk-1')),
+  });
+  assert.equal(dup.status, 400);
+  assert.match((await dup.json()).errors[0].message, /ref 'desk-1' already exists/);
   await rejects(cf.addRedirectRule(ZONE, { ...redirectRule('desk-2'), action: 'block' }), (e) => assert.equal(e.status, 400));
   assert.equal(fake.redirectRules(ZONE).length, 1);
 });
@@ -692,4 +1147,167 @@ test('fake sites: redirects are followed unless the caller says manual; pages ca
   assert.equal(await followed.text(), '<title>Live</title>');
   assert.equal((await sites.fetch('https://www.example.com/', { redirect: 'manual' })).status, 301);
   await assert.rejects(sites.fetch('https://www.example.com/', { redirect: 'error' }), TypeError);
+});
+
+// --- The fake public DNS ---
+
+const RESOLVE = {
+  'dns.google': (name, type) => `https://dns.google/resolve?name=${name}&type=${type}`,
+  'cloudflare-dns.com': (name, type) => `https://cloudflare-dns.com/dns-query?name=${name}&type=${type}`,
+};
+const JSON_DNS = { headers: { accept: 'application/dns-json' } };
+
+async function ask(doh, resolver, name, type) {
+  const res = await doh.fetch(RESOLVE[resolver](name, type), JSON_DNS);
+  assert.equal(res.status, 200);
+  return res.json();
+}
+
+const table = () => ({
+  'example.com': {
+    NS: ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'],
+    A: [{ data: '192.0.2.10', TTL: 3600 }],
+    MX: '10 mx.example.net',
+    TXT: 'v=spf1 include:example.net -all',
+  },
+  'www.example.com': { CNAME: 'example.com' },
+  'loop.example.com': { CNAME: 'loop.example.com.' },
+  'empty.example.com': {},
+});
+
+test('fake DoH: both resolvers answer DoH JSON the way each is seen to', async () => {
+  const doh = createFakeDoh({ 'dns.google': table(), 'cloudflare-dns.com': table() });
+  const google = await ask(doh, 'dns.google', 'Example.com', 'NS');
+  assert.equal(google.Status, 0);
+  assert.deepEqual(google.Question, [{ name: 'example.com.', type: 2 }]);
+  assert.deepEqual(google.Answer, [
+    { name: 'example.com.', type: 2, TTL: 300, data: 'ada.ns.cloudflare.com.' },
+    { name: 'example.com.', type: 2, TTL: 300, data: 'bob.ns.cloudflare.com.' },
+  ]);
+  const cf = await ask(doh, 'cloudflare-dns.com', 'example.com.', 'NS');
+  assert.deepEqual(cf.Answer.map((a) => [a.name, a.data]),
+    [['example.com', 'ada.ns.cloudflare.com.'], ['example.com', 'bob.ns.cloudflare.com.']]);
+
+  assert.deepEqual((await ask(doh, 'dns.google', 'example.com', 'A')).Answer,
+    [{ name: 'example.com.', type: 1, TTL: 3600, data: '192.0.2.10' }]);
+  assert.deepEqual((await ask(doh, 'dns.google', 'example.com', 'MX')).Answer.map((a) => [a.type, a.data]), [[15, '10 mx.example.net.']]);
+  assert.equal((await ask(doh, 'dns.google', 'example.com', 'TXT')).Answer[0].data, 'v=spf1 include:example.net -all');
+  assert.equal((await ask(doh, 'cloudflare-dns.com', 'example.com', 'TXT')).Answer[0].data, '"v=spf1 include:example.net -all"');
+  assert.equal((await ask(doh, 'dns.google', 'example.com', '2')).Answer.length, 2, 'a type may be given by number');
+
+  const res = await doh.fetch(RESOLVE['cloudflare-dns.com']('example.com', 'A'), JSON_DNS);
+  assert.equal(res.headers.get('content-type'), 'application/dns-json');
+  assert.deepEqual(doh.calls.at(-1), {
+    resolver: 'cloudflare-dns.com', url: RESOLVE['cloudflare-dns.com']('example.com', 'A'),
+    name: 'example.com', type: 'A', accept: 'application/dns-json',
+  });
+});
+
+test('fake DoH: an unknown name is NXDOMAIN; a known name without that type has no Answer', async () => {
+  const doh = createFakeDoh({ 'dns.google': table() });
+  const missing = await ask(doh, 'dns.google', 'nowhere.example.com', 'A');
+  assert.equal(missing.Status, 3);
+  assert.ok(!('Answer' in missing));
+  for (const [name, type] of [['empty.example.com', 'A'], ['example.com', 'AAAA']]) {
+    const none = await ask(doh, 'dns.google', name, type);
+    assert.equal(none.Status, 0, name);
+    assert.ok(!('Answer' in none), name);
+  }
+});
+
+test('fake DoH: a CNAME is followed, the way a resolver answers an A query', async () => {
+  const doh = createFakeDoh({ 'cloudflare-dns.com': table() });
+  const www = await ask(doh, 'cloudflare-dns.com', 'www.example.com', 'A');
+  assert.equal(www.Status, 0);
+  assert.deepEqual(www.Answer.map((a) => [a.name, a.type, a.data]), [
+    ['www.example.com', 5, 'example.com.'],
+    ['example.com', 1, '192.0.2.10'],
+  ]);
+  assert.deepEqual((await ask(doh, 'cloudflare-dns.com', 'www.example.com', 'CNAME')).Answer.map((a) => a.data), ['example.com.']);
+  assert.equal((await ask(doh, 'cloudflare-dns.com', 'loop.example.com', 'A')).Status, 2, 'a CNAME loop is SERVFAIL');
+
+  doh.set('www.example.com', 'CNAME', 'gone.example.net');
+  const dangling = await ask(doh, 'cloudflare-dns.com', 'www.example.com', 'A');
+  assert.equal(dangling.Status, 3, 'a CNAME to nowhere is NXDOMAIN, with the CNAME in the answer');
+  assert.equal(dangling.Answer.length, 1);
+});
+
+test('fake DoH: cloudflare-dns.com answers JSON only when asked for it', async () => {
+  const doh = createFakeDoh({ 'dns.google': table(), 'cloudflare-dns.com': table() });
+  assert.equal((await doh.fetch(RESOLVE['cloudflare-dns.com']('example.com', 'A'))).status, 400);
+  assert.equal((await doh.fetch(RESOLVE['cloudflare-dns.com']('example.com', 'A') + '&ct=application/dns-json')).status, 200);
+  assert.equal((await doh.fetch(RESOLVE['dns.google']('example.com', 'A'))).status, 200, 'dns.google does not mind');
+  assert.equal((await doh.fetch('https://dns.google/dns-query?name=example.com')).status, 404);
+  assert.equal((await doh.fetch('https://dns.google/resolve?type=A')).status, 400, 'no name');
+  assert.equal((await doh.fetch(RESOLVE['dns.google']('example.com', 'BOGUS'))).status, 400);
+});
+
+test('fake DoH: answers change between calls, on both resolvers or on one', async () => {
+  const doh = createFakeDoh({ 'dns.google': table(), 'cloudflare-dns.com': table() });
+  const a = async (resolver) => (await ask(doh, resolver, 'example.com', 'A')).Answer?.map((x) => x.data);
+  doh.set('example.com', 'A', ['198.51.100.1', '198.51.100.2']);
+  assert.deepEqual(await a('dns.google'), ['198.51.100.1', '198.51.100.2']);
+  assert.deepEqual(await a('cloudflare-dns.com'), ['198.51.100.1', '198.51.100.2']);
+  doh.set('Example.com.', 'A', '192.0.2.99', 'dns.google');
+  assert.deepEqual(await a('dns.google'), ['192.0.2.99']);
+  assert.deepEqual(await a('cloudflare-dns.com'), ['198.51.100.1', '198.51.100.2'], 'the other keeps its answer, as a cache would');
+  doh.set('example.com', 'A', null);
+  assert.equal(await a('dns.google'), undefined);
+  doh.answers['cloudflare-dns.com']['new.example.com'] = { A: '203.0.113.5' };
+  assert.equal((await ask(doh, 'cloudflare-dns.com', 'new.example.com', 'A')).Answer[0].data, '203.0.113.5');
+});
+
+test('fake DoH: a resolver can be unreachable, or answer however a test says', async () => {
+  const doh = createFakeDoh({
+    'dns.google': () => ({ Status: 2, Comment: 'SERVFAIL' }),
+  });
+  assert.equal((await ask(doh, 'dns.google', 'example.com', 'NS')).Status, 2);
+  await assert.rejects(doh.fetch(RESOLVE['cloudflare-dns.com']('example.com', 'NS'), JSON_DNS), TypeError, 'no table: unreachable');
+  doh.answers['dns.google'] = () => { throw new TypeError('fetch failed'); };
+  await assert.rejects(doh.fetch(RESOLVE['dns.google']('example.com', 'NS')), /fetch failed/);
+
+  doh.set('example.com', 'NS', 'ada.ns.cloudflare.com', 'cloudflare-dns.com');
+  assert.equal((await ask(doh, 'cloudflare-dns.com', 'example.com', 'NS')).Answer.length, 1, 'set() on one resolver gives it a table');
+  doh.set('example.com', 'A', '192.0.2.1');
+  await assert.rejects(doh.fetch(RESOLVE['dns.google']('example.com', 'A')), /fetch failed/, 'set() leaves a function resolver alone');
+});
+
+// --- One fetch for all the fakes ---
+
+test('combineFetches sends each URL to the fake that owns it, and logs every call', async () => {
+  const fake = createFakeCloudflare({ accountId: ACCOUNT, zones: [{ id: ZONE, name: 'example.com' }] });
+  const sites = createFakeSites({ 'https://staging.example.com/': { body: '<title>Staging</title>' } });
+  const doh = createFakeDoh({ 'dns.google': table() });
+  const certs = async () => Response.json({ keys: [] });
+  const net = combineFetches(fake, sites, doh, ['tbox.cloudflareaccess.com', certs]);
+
+  const cf = cloudflare({ token: TOKEN, accountId: ACCOUNT, fetchImpl: net });
+  assert.equal(await cf.getSslMode(ZONE), 'full');
+  assert.equal(await (await net('https://staging.example.com/', { redirect: 'manual' })).text(), '<title>Staging</title>');
+  assert.equal((await (await net(RESOLVE['dns.google']('example.com', 'NS'))).json()).Answer.length, 2);
+  assert.deepEqual(await (await net('https://tbox.cloudflareaccess.com/cdn-cgi/access/certs')).json(), { keys: [] });
+  await assert.rejects(net('https://nowhere.example/'), (e) => e instanceof TypeError && /ENOTFOUND nowhere\.example/.test(e.cause.message));
+
+  assert.deepEqual(net.calls.map((c) => new URL(c.url).hostname),
+    ['api.cloudflare.com', 'staging.example.com', 'dns.google', 'tbox.cloudflareaccess.com', 'nowhere.example']);
+  assert.deepEqual([fake.calls.length, sites.calls.length, doh.calls.length], [1, 1, 1]);
+
+  // A page added later belongs to the sites fake from then on.
+  sites.pages['https://example.com/'] = { body: 'live' };
+  assert.equal(await (await net('https://example.com/')).text(), 'live');
+});
+
+test('combineFetches takes a hostname, a RegExp or a function to say which URLs a part answers', async () => {
+  const answer = (text) => async () => new Response(text);
+  const net = combineFetches(
+    [/^https:\/\/a\.example\/only\//, answer('regexp')],
+    [(url) => url.hostname.endsWith('.b.example'), answer('function')],
+    ['c.example', answer('hostname')],
+    ['a.example', answer('fallback')],
+  );
+  assert.equal(await (await net('https://a.example/only/x')).text(), 'regexp');
+  assert.equal(await (await net('https://a.example/other')).text(), 'fallback', 'the first part that claims it wins');
+  assert.equal(await (await net('https://x.b.example/')).text(), 'function');
+  assert.equal(await (await net(new Request('https://c.example/', { method: 'POST' }))).text(), 'hostname');
+  assert.equal(net.calls.at(-1).method, 'POST');
 });

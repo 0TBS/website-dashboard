@@ -10,30 +10,18 @@
 // goes through the same instance, one at a time. On top of that, an edit can
 // name the updated_at it started from, and is refused if the row has moved on
 // since, so a stale edit cannot overwrite a teammate's newer one.
+//
+// Going live from the desk (golive-routes.js) keeps its record in the same
+// object, in tables of its own (golive-store.js).
 
 import { DurableObject } from 'cloudflare:workers';
-import { cleanSite, toJson, InvalidField, FLAGS } from './sites.js';
+import { cleanSite, toJson, InvalidField, COLUMNS, ensureSitesSchema } from './sites.js';
 import { sessionToken, cookieValues, sessionCookie, clearCookie } from './session.js';
+import { json } from './answers.js';
+import * as golive from './golive-store.js';
+import { handleGoLive, handleGoLiveSignin } from './golive-routes.js';
 
-const COLUMNS = ['name', 'live_domain', 'staging_domain', 'github_repo', 'live_platform', ...FLAGS, 'notes'];
-
-// Made when the object first starts rather than by a migration step, so a
-// fresh deploy works with nothing to run by hand.
-const SCHEMA = `CREATE TABLE IF NOT EXISTS sites (
-  id             TEXT PRIMARY KEY,
-  name           TEXT NOT NULL,
-  live_domain    TEXT,
-  staging_domain TEXT,
-  github_repo    TEXT,
-  live_platform  TEXT CHECK (live_platform IN ('astro','wordpress','other','none')),
-  astro_staging  INTEGER CHECK (astro_staging IN (0,1)),
-  domain_ours    INTEGER CHECK (domain_ours IN (0,1)),
-  needs_seo_ppc  INTEGER CHECK (needs_seo_ppc IN (0,1)),
-  notes          TEXT,
-  created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL
-)`;
-
+// The table's shape lives in sites.js with the rest of what a site is.
 // Fields reaching these methods have already been through cleanSite() in the
 // Worker, so the object only stores and reads. Not found is null, not an
 // error: errors lose their class crossing the RPC boundary.
@@ -41,16 +29,20 @@ export class Desk extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.sql.exec(SCHEMA);
+    ensureSitesSchema(this.sql);
+    golive.ensureGoliveSchema(this.sql);
   }
 
+  // Each site carries where its go-live stands (null when it never went
+  // live from the desk), so the list can show it without asking again.
   list() {
-    return this.sql.exec('SELECT * FROM sites ORDER BY name COLLATE NOCASE').toArray().map(toJson);
+    const summaries = golive.goliveSummaries(this.sql);
+    return this.sql.exec('SELECT * FROM sites ORDER BY name COLLATE NOCASE').toArray()
+      .map((row) => ({ ...toJson(row), golive: summaries.get(row.id) ?? null }));
   }
 
   read(id) {
-    const rows = this.sql.exec('SELECT * FROM sites WHERE id = ?', id).toArray();
-    return rows.length ? toJson(rows[0]) : null;
+    return golive.siteWithGolive(this.sql, id);
   }
 
   create(fields) {
@@ -82,29 +74,55 @@ export class Desk extends DurableObject {
     return { site: this.read(id) };
   }
 
+  // Returns true, false (no such site) or { blocked: 'golive-active' }: a site
+  // whose go-live still needs a person (running, being checked, or failed and
+  // not put back) stays, or nobody could finish it from the desk. Its go-live
+  // row and log stay in the database either way.
   remove(id) {
     if (!this.read(id)) return false;
+    if (golive.goliveBlocksDelete(this.sql, id)) return { blocked: 'golive-active' };
     this.sql.exec('DELETE FROM sites WHERE id = ?', id);
     return true;
+  }
+
+  // Going live: the store's functions, called from golive-routes.js. The
+  // Worker passes its own clock (`now`) in the options. Each write runs in
+  // one transaction, so a step that fails part-way leaves nothing of itself.
+  goliveDetail(siteId, now) {
+    return golive.goliveDetail(this.sql, siteId, now);
+  }
+
+  goliveLastCheck(siteId) {
+    return golive.goliveLastCheck(this.sql, siteId);
+  }
+
+  goliveHostsInUse(siteId, hosts) {
+    return golive.goliveHostsInUse(this.sql, siteId, hosts);
+  }
+
+  goliveSaveCheck(siteId, check) {
+    return this.ctx.storage.transactionSync(() => golive.goliveSaveCheck(this.sql, siteId, check));
+  }
+
+  goliveBegin(siteId, run) {
+    return this.ctx.storage.transactionSync(() => golive.goliveBegin(this.sql, siteId, run));
+  }
+
+  goliveStep(siteId, token, step) {
+    return this.ctx.storage.transactionSync(() => golive.goliveStep(this.sql, siteId, token, step));
+  }
+
+  goliveFinish(siteId, token, end) {
+    return this.ctx.storage.transactionSync(() => golive.goliveFinish(this.sql, siteId, token, end));
+  }
+
+  goliveSaveVerify(siteId, result) {
+    return this.ctx.storage.transactionSync(() => golive.goliveSaveVerify(this.sql, siteId, result));
   }
 }
 
 // The one instance, placed in eastern North America, near the team.
 const desk = (env) => env.DESK.get(env.DESK.idFromName('desk'), { locationHint: 'enam' });
-
-function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-      'x-robots-tag': 'noindex, nofollow, noarchive',
-      'x-content-type-options': 'nosniff',
-      'referrer-policy': 'no-referrer',
-      'strict-transport-security': 'max-age=31536000',
-    },
-  });
-}
 
 // The zone's own "Always Use HTTPS" is off, and turning it on would change
 // every *.10xid.com client host, so this host enforces HTTPS itself. On unless
@@ -177,10 +195,18 @@ async function handleSession(request, env, secure) {
 
 const notFound = () => json({ error: 'No site with that id.' }, 404);
 
-async function handleApi(request, env, url) {
+async function handleApi(request, env, url, ctx) {
   const secure = url.protocol === 'https:';
   const parts = url.pathname.replace(/\/+$/, '').split('/'); // ['', 'api', 'sites', id?]
   if (parts[2] === 'session' && parts.length === 3) return handleSession(request, env, secure);
+  // Where Cloudflare Access sends a person back after its login. It arrives
+  // from Access's own site, so the SameSite=Strict login cookie is not sent
+  // with it and the key cannot be checked here. It changes nothing and shows
+  // nothing: it checks the Access login and redirects to the page, which
+  // then asks with the cookie like any other request.
+  if (parts[2] === 'golive' && parts[3] === 'signin' && parts.length === 4) {
+    return handleGoLiveSignin(request, env, { url });
+  }
 
   const cred = await credential(request, env);
   if (cred !== 'bearer' && cred !== 'cookie') return refuse(env, cred, secure);
@@ -193,7 +219,12 @@ async function handleApi(request, env, url) {
     return json({ error: 'Changes must come from the desk page itself.', code: 'not-from-desk' }, 403);
   }
 
-  const res = await handleSites(request, env, parts);
+  // Going live needs the key and, on top of it, the person's own Access
+  // login, which golive-routes.js checks. A switch or rollback is handed to
+  // waitUntil, so it runs to its end even if the page goes away.
+  const res = parts[2] === 'golive'
+    ? await handleGoLive(request, env, { parts, url, store: desk(env), waitUntil: (p) => ctx.waitUntil(p) })
+    : await handleSites(request, env, parts);
   // Each visit restarts the cookie's 400 days, so an active browser never expires.
   if (cred === 'cookie') res.headers.append('set-cookie', sessionCookie(await sessionToken(env.DASH_KEY), secure));
   return res;
@@ -226,7 +257,14 @@ async function handleSites(request, env, parts) {
       return json({ site: res.site });
     }
     if (id && m === 'DELETE') {
-      return (await desk(env).remove(id)) ? json({ deleted: id }) : notFound();
+      const removed = await desk(env).remove(id);
+      if (removed?.blocked) {
+        return json({
+          error: 'This site has a go-live that is not finished. Roll it back, or wait for it to finish, before deleting it.',
+          code: 'golive-active',
+        }, 409);
+      }
+      return removed ? json({ deleted: id }) : notFound();
     }
     return json({ error: 'Method not allowed.' }, 405);
   } catch (e) {
@@ -236,7 +274,7 @@ async function handleSites(request, env, parts) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const isApi = url.pathname === '/api' || url.pathname.startsWith('/api/');
     if (insecure(url, env)) {
@@ -246,7 +284,7 @@ export default {
       url.protocol = 'https:';
       return Response.redirect(url.toString(), 301);
     }
-    if (isApi) return handleApi(request, env, url);
+    if (isApi) return handleApi(request, env, url, ctx);
     return env.ASSETS.fetch(request);
   },
 };

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanSite, normalizeAddress, normalizeRepo, toJson, InvalidField } from '../src/sites.js';
+import { cleanSite, normalizeAddress, normalizeRepo, normalizeChatUrl, toJson, InvalidField, ensureSitesSchema, COLUMNS } from '../src/sites.js';
+import { sqliteStorage } from './sqlite-adapter.js';
 
 test('addresses lose scheme, trailing slash and host case, keep a path', () => {
   assert.equal(normalizeAddress('https://WWW.Example.com/'), 'www.example.com');
@@ -59,4 +60,51 @@ test('stored 0/1/NULL flags reach the page as false/true/null', () => {
   assert.equal(s.astro_staging, true);
   assert.equal(s.domain_ours, false);
   assert.equal(s.needs_seo_ppc, null);
+});
+
+test('a chat link is kept only when it is a claude.ai link', () => {
+  assert.equal(normalizeChatUrl('https://claude.ai/code/session_01Abc'), 'https://claude.ai/code/session_01Abc');
+  assert.equal(normalizeChatUrl('claude.ai/code/session_01Abc/'), 'https://claude.ai/code/session_01Abc');
+  assert.equal(normalizeChatUrl('https://www.claude.ai/chat/abc?x=1'), 'https://claude.ai/chat/abc?x=1');
+  assert.equal(normalizeChatUrl('  '), null);
+  assert.equal(normalizeChatUrl(null), null);
+  for (const bad of ['http://claude.ai/code/x', 'https://claude.ai.evil.com/x', 'https://evil.com/claude.ai',
+    'javascript:alert(1)', 'https://user@claude.ai/x', 'https://claude.ai:8443/x', 'not a link at all']) {
+    assert.throws(() => normalizeChatUrl(bad), undefined, bad);
+  }
+  try { cleanSite({ chat_url: 'https://example.com' }); assert.fail('should throw'); } catch (e) {
+    assert.equal(e.field, 'chat_url');
+    assert.match(e.message, /Chat link should be a claude.ai link/);
+  }
+});
+
+test('an environment is one short line', () => {
+  assert.equal(cleanSite({ environment: '  backblaze/CF \n ' }).environment, 'backblaze/CF');
+  assert.equal(cleanSite({ environment: 'a\nb' }).environment, 'a b');
+  assert.equal(cleanSite({ environment: '' }).environment, null);
+  assert.throws(() => cleanSite({ environment: 'x'.repeat(81) }), (e) => e.field === 'environment');
+});
+
+test('the sites table gains chat_url and environment in place, keeping every row', () => {
+  const { sql } = sqliteStorage();
+  // The table as the live desk made it before these two fields existed.
+  sql.exec(`CREATE TABLE sites (id TEXT PRIMARY KEY, name TEXT NOT NULL, live_domain TEXT, staging_domain TEXT,
+    github_repo TEXT, live_platform TEXT, astro_staging INTEGER, domain_ours INTEGER, needs_seo_ppc INTEGER,
+    notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+  sql.exec("INSERT INTO sites (id, name, created_at, updated_at) VALUES ('a', 'Acme', 't', 't')");
+  ensureSitesSchema(sql);
+  ensureSitesSchema(sql);   // a second start changes nothing
+  const cols = sql.exec('PRAGMA table_info(sites)').toArray().map((c) => c.name);
+  for (const c of COLUMNS) assert.ok(cols.includes(c), c);
+  const row = sql.exec('SELECT * FROM sites').toArray()[0];
+  assert.equal(row.name, 'Acme');
+  assert.equal(row.chat_url, null);
+  assert.equal(row.environment, null);
+});
+
+test('a fresh desk gets every column at once', () => {
+  const { sql } = sqliteStorage();
+  ensureSitesSchema(sql);
+  const cols = sql.exec('PRAGMA table_info(sites)').toArray().map((c) => c.name);
+  for (const c of COLUMNS) assert.ok(cols.includes(c), c);
 });

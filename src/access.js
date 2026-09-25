@@ -32,10 +32,26 @@ export function teamOrigin(raw) {
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?\.cloudflareaccess\.com$/.test(host) ? 'https://' + host : null;
 }
 
+// ASCII only, on purpose. trim() also takes Unicode spaces away, and
+// toLowerCase() folds Unicode (the Kelvin sign becomes an ASCII k), so an
+// address that only looks like one on the list could pass as it.
+const ASCII_SPACE = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g;
+const PRINTABLE = /^[\x21-\x7e]+$/;
+
+// An email as the desk compares it: ASCII spaces trimmed, ASCII letters
+// lowered. '' when there is none, null when it is not printable ASCII.
+function emailOf(raw) {
+  if (typeof raw !== 'string') return '';
+  const s = raw.replace(ASCII_SPACE, '');
+  if (!s) return '';
+  return PRINTABLE.test(s) ? s.replace(/[A-Z]/g, (c) => c.toLowerCase()) : null;
+}
+
 // "Ana@Example.com, ben@example.org\ncy@example.net" -> lower-case emails.
+// An entry that is not printable ASCII is left out: nobody can match it.
 export function allowedEmails(raw) {
   if (typeof raw !== 'string') return [];
-  return raw.split(/[\s,]+/).map((e) => e.toLowerCase()).filter(Boolean);
+  return raw.split(/[\t\n\f\r ,]+/).map(emailOf).filter(Boolean);
 }
 
 // Names only, never values. A team domain that is not an Access team, or an
@@ -154,7 +170,11 @@ function claimProblem(p, env, team, now) {
 // script, not a person) has no email, only common_name, so it can never go
 // live.
 function person(p, env) {
-  const email = typeof p.email === 'string' ? p.email.trim().toLowerCase() : '';
+  const email = emailOf(p.email);
+  if (email === null) {
+    return fail(403, 'not-allowed',
+      'The email address in this Access login has a space or a character outside plain ASCII, so the desk cannot match it against the list.');
+  }
   if (!email) {
     return fail(403, 'not-allowed', p.common_name
       ? 'A Cloudflare Access service token cannot go live. Only a person signed in with their own email can.'

@@ -28,15 +28,15 @@
   <!-- Each number is also a filter: tap it to see just those sites, tap again to see them all. -->
   <div class="status" id="stats">
     <button class="stat" type="button" data-set='{}'><span class="k">Sites</span><span class="v" data-count="all">–</span></button>
-    <button class="stat" type="button" data-set='{"platform":"astro"}'><span class="k">Live on Astro</span><span class="v" data-count="astro">–</span></button>
-    <button class="stat" type="button" data-set='{"platform":"wordpress"}'><span class="k">Live on WordPress</span><span class="v" data-count="wordpress">–</span></button>
-    <button class="stat" type="button" data-set='{"staging":"yes"}'><span class="k">Astro staging</span><span class="v" data-count="staging">–</span></button>
+    <button class="stat" type="button" data-set='{"stage":"pending"}'><span class="k">Pending</span><span class="v" data-count="pending">–</span></button>
+    <button class="stat" type="button" data-set='{"stage":"staging"}'><span class="k">Staging only</span><span class="v" data-count="staging">–</span></button>
+    <button class="stat" type="button" data-set='{"stage":"live"}'><span class="k">Live</span><span class="v" data-count="live">–</span></button>
     <button class="stat" type="button" data-set='{"domain":"yes"}'><span class="k">Our domains</span><span class="v" data-count="ours">–</span></button>
     <button class="stat" type="button" data-set='{"seo":"yes"}'><span class="k">Need SEO / PPC</span><span class="v"><span class="pill pill-open" data-count="seo">–</span></span></button>
   </div>
 
   <h2>The sites</h2>
-  <p class="sub">Tap a name to see its addresses and change where it stands. Every change saves the moment you make it. A field nobody has filled in says <strong>not set</strong> rather than guessing.</p>
+  <p class="sub">Sites are grouped by stage: <strong>Pending</strong> is waiting to be staged, <strong>Staging only</strong> has an Astro staging build that is not live yet, and <strong>Live</strong> runs on Astro. Tap a name to see its addresses and change where it stands. Every change saves the moment you make it. A field nobody has filled in says <strong>not set</strong> rather than guessing.</p>
 
   <div class="tools" id="tools">
     <label class="search">
@@ -44,6 +44,11 @@
       <input type="search" id="f-q" placeholder="Search by name, domain or repo" autocomplete="off" spellcheck="false">
     </label>
     <div class="filters">
+      <label class="fsel"><span class="flbl">Stage</span>
+        <select id="f-stage">
+          <option value="">Any</option><option value="pending">Pending</option><option value="staging">Staging only</option><option value="live">Live</option>
+        </select>
+      </label>
       <label class="fsel"><span class="flbl">Live on</span>
         <select id="f-platform">
           <option value="">Any</option><option value="astro">Astro</option><option value="wordpress">WordPress</option>
@@ -68,7 +73,7 @@
       <label class="fsel"><span class="flbl">Sort</span>
         <select id="f-sort">
           <option value="name">Name, A to Z</option><option value="name-desc">Name, Z to A</option>
-          <option value="updated">Recently changed</option><option value="created">Recently added</option>
+          <option value="updated">Last changed</option><option value="created">Last added</option>
         </select>
       </label>
     </div>
@@ -116,6 +121,11 @@
       <input name="staging_domain" placeholder="staging.example.com" autocomplete="off" spellcheck="false" inputmode="url"></label>
     <label class="field"><span>GitHub repo</span>
       <input name="github_repo" placeholder="owner/repo or its GitHub link" autocomplete="off" spellcheck="false"></label>
+    <label class="field"><span>Chat link</span>
+      <input name="chat_url" placeholder="claude.ai/code/session_…" autocomplete="off" spellcheck="false" inputmode="url"></label>
+    <label class="field"><span>Environment</span>
+      <input name="environment" placeholder="backblaze/CF" maxlength="80" autocomplete="off" spellcheck="false" list="envs"></label>
+    <datalist id="envs"></datalist>
     <div class="edgrid">
       <label class="field"><span>Live site runs on</span>
         <select name="live_platform">
@@ -136,6 +146,17 @@
       <button class="btn" type="button" id="ed-cancel">Cancel</button>
       <button class="btn open" type="submit" id="ed-save">Save</button>
     </div>
+  </form>
+</dialog>
+
+<!-- Go live. Everything inside is drawn by app.js for the step it is at:
+     sign in, checks and plan, switching, the result, or Roll back. -->
+<dialog class="editor golive" id="golive" aria-labelledby="gl-title">
+  <form id="glform" novalidate>
+    <h3 id="gl-title" tabindex="-1">Go live</h3>
+    <p class="glsay" id="gl-say" role="status" aria-live="polite"></p>
+    <div class="glbody" id="gl-body"></div>
+    <div class="edbtns" id="gl-btns"></div>
   </form>
 </dialog>
 </body>

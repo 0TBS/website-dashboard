@@ -9,8 +9,45 @@ export const PLATFORMS = ['astro', 'wordpress', 'other', 'none'];
 // The yes/no questions. null is "not set" — shown as such, never as a no.
 export const FLAGS = ['astro_staging', 'domain_ours', 'needs_seo_ppc'];
 
-const TEXT_LIMITS = { name: 120, notes: 2000 };
+const TEXT_LIMITS = { name: 120, environment: 80, notes: 2000 };
 const ADDRESS_LIMIT = 300;
+
+// Every field a person sets, in the order the table holds them.
+export const COLUMNS = ['name', 'live_domain', 'staging_domain', 'github_repo', 'chat_url', 'environment',
+  'live_platform', ...FLAGS, 'notes'];
+
+// Made when the object first starts rather than by a migration step, so a
+// fresh deploy works with nothing to run by hand.
+const SCHEMA = `CREATE TABLE IF NOT EXISTS sites (
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL,
+  live_domain    TEXT,
+  staging_domain TEXT,
+  github_repo    TEXT,
+  chat_url       TEXT,
+  environment    TEXT,
+  live_platform  TEXT CHECK (live_platform IN ('astro','wordpress','other','none')),
+  astro_staging  INTEGER CHECK (astro_staging IN (0,1)),
+  domain_ours    INTEGER CHECK (domain_ours IN (0,1)),
+  needs_seo_ppc  INTEGER CHECK (needs_seo_ppc IN (0,1)),
+  notes          TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+)`;
+
+// Columns that came after the live table was first made. SQLite adds a
+// column in place and keeps every row, so an existing desk picks them up the
+// next time it starts; once they are there this does nothing.
+const ADDED = { chat_url: 'TEXT', environment: 'TEXT' };
+
+// `sql` is the Durable Object's ctx.storage.sql, or anything shaped like it.
+export function ensureSitesSchema(sql) {
+  sql.exec(SCHEMA);
+  const have = new Set(sql.exec('PRAGMA table_info(sites)').toArray().map((c) => c.name));
+  for (const [name, type] of Object.entries(ADDED)) {
+    if (!have.has(name)) sql.exec(`ALTER TABLE sites ADD COLUMN ${name} ${type}`);
+  }
+}
 
 export class InvalidField extends Error {
   constructor(field, message) {
@@ -55,6 +92,28 @@ export function normalizeRepo(raw) {
   return m[1] + '/' + m[2];
 }
 
+// The Claude chat where the site is worked on: "claude.ai/code/session_…" or
+// the same with https://. Only claude.ai links are kept, so the page never
+// shows a link to anywhere else under the name "Chat".
+export function normalizeChatUrl(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  let url;
+  try {
+    url = new URL(/^[a-z][a-z0-9+.-]*:/i.test(s) ? s : 'https://' + s);
+  } catch {
+    throw new Error('should be a claude.ai link');
+  }
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== 'https:' || (host !== 'claude.ai' && host !== 'www.claude.ai') || url.username || url.password || url.port) {
+    throw new Error('should be a claude.ai link');
+  }
+  const out = 'https://claude.ai' + url.pathname.replace(/\/+$/, '') + url.search;
+  if (out.length > ADDRESS_LIMIT) throw new Error('is too long');
+  return out;
+}
+
 function normalizeFlag(raw) {
   if (raw === null || raw === '' || raw === undefined) return null;
   if (raw === true || raw === 1 || raw === '1' || raw === 'true' || raw === 'yes') return 1;
@@ -72,7 +131,8 @@ function normalizeText(raw, limit) {
 
 const LABELS = {
   name: 'Client name', live_domain: 'Live domain', staging_domain: 'Staging domain',
-  github_repo: 'GitHub repo', live_platform: 'Live platform', notes: 'Notes',
+  github_repo: 'GitHub repo', chat_url: 'Chat link', environment: 'Environment',
+  live_platform: 'Live platform', notes: 'Notes',
   astro_staging: 'Astro staging', domain_ours: 'Domain', needs_seo_ppc: 'SEO / PPC',
 };
 
@@ -95,6 +155,9 @@ export function cleanSite(input, { creating = false } = {}) {
   run('live_domain', normalizeAddress);
   run('staging_domain', normalizeAddress);
   run('github_repo', normalizeRepo);
+  run('chat_url', normalizeChatUrl);
+  // One line: an environment's name, such as "backblaze/CF".
+  run('environment', (v) => normalizeText(v, TEXT_LIMITS.environment)?.replace(/\s+/g, ' ') ?? null);
   run('live_platform', (v) => {
     if (v === null || v === '' || v === undefined) return null;
     if (!PLATFORMS.includes(v)) throw new Error('must be one of ' + PLATFORMS.join(', '));

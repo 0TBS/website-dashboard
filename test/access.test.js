@@ -236,6 +236,41 @@ test('an email not on the list is refused and named', async () => {
   }
 });
 
+// toLowerCase() folds Unicode: U+212A KELVIN SIGN becomes an ASCII k, so an
+// address that is not ken@example.org would be let in as ken@example.org and
+// every log line would name ken. Only printable ASCII is ever compared, and
+// only ASCII letters are lowered.
+test('an email that is not printable ASCII is refused, never folded into someone on the list', async () => {
+  const e2 = { ...env, GOLIVE_EMAILS: 'ken@example.org, ana@example.com, straße@example.com' };
+  for (const email of [
+    'Ken@example.org',          // Kelvin sign
+    'ana@example.com　',          // ideographic space: not trimmed away
+    ' ana@example.com',          // no-break space
+    'ana@exаmple.com',           // Cyrillic a
+    'STRASSE@example.com',
+    'straße@example.com',        // on the list, but the list entry is not ASCII either
+    'ana@\texample.com',
+    'ana @example.com',
+  ]) {
+    const res = await check(await sign(claims({ email })), { env: e2 });
+    assert.equal(res.ok, false, JSON.stringify(email));
+    assert.equal(res.code, 'not-allowed', JSON.stringify(email));
+  }
+  const odd = await check(await sign(claims({ email: 'Ken@example.org' })), { env: e2 });
+  assert.deepEqual(odd, {
+    ok: false, status: 403, code: 'not-allowed',
+    error: 'The email address in this Access login has a space or a character outside plain ASCII, so the desk cannot match it against the list.',
+  });
+  // ASCII spaces around it are still trimmed, and ASCII letters lowered.
+  assert.deepEqual(await check(await sign(claims({ email: ' \tKEN@Example.ORG \n' })), { env: e2 }), { ok: true, email: 'ken@example.org' });
+});
+
+test('the allowlist keeps printable ASCII entries only, and splits on ASCII white space and commas', () => {
+  assert.deepEqual(allowedEmails('KEN@example.org,Ken@example.org straße@example.com'), ['ken@example.org']);
+  assert.deepEqual(allowedEmails('ana@example.com ben@example.org'), [], 'a no-break space does not split: one odd entry');
+  assert.deepEqual(allowedEmails('ÅNA@example.com'), [], 'no Unicode lowering');
+});
+
 test('the allowlist is read case-insensitively, split on commas and white space', async () => {
   assert.deepEqual(allowedEmails('Ana@Example.com, ben@example.org\n  cy@example.net,,dee@example.com\t'),
     ['ana@example.com', 'ben@example.org', 'cy@example.net', 'dee@example.com']);

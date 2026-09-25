@@ -3,3 +3,19 @@
 DASH_KEY=local-dev-key
 # wrangler dev is plain HTTP; the live desk refuses HTTP unless this is off.
 HTTPS_ONLY=off
+
+# Going live from the desk (README, "Going live from the desk"). Without all
+# five, /api/golive/* answers 503 golive-not-set-up and the rest of the desk
+# works as before. In production each one is a Worker secret too.
+# Not CF_API_TOKEN and CF_ACCOUNT_ID: wrangler reads those from your shell as
+# its own deploy credentials, so the desk's are named apart.
+# The Cloudflare API token that changes the client zones' DNS and Workers:
+# GOLIVE_API_TOKEN=
+# The Cloudflare account that holds the client zones and their Workers:
+# GOLIVE_ACCOUNT_ID=
+# The Cloudflare Access team, <team>.cloudflareaccess.com:
+# ACCESS_TEAM_DOMAIN=
+# The Access application's Audience (AUD) tag:
+# ACCESS_AUD=
+# Who may go live: email addresses, separated by commas or spaces:
+# GOLIVE_EMAILS=

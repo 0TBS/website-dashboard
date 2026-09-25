@@ -41,6 +41,11 @@
   --shadow:0 1px 1px rgba(0,0,0,.4), 0 12px 30px -16px rgba(0,0,0,.8);
 }
 *{box-sizing:border-box}
+/* Phones: iOS enlarges text on its own when turned sideways unless told
+   not to, and a sideways swipe at the end of a vertical one rubber-bands the
+   whole page. Both read as the page wandering left and right. */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+html,body{overscroll-behavior-x:none}
 [hidden]{display:none!important}
 body{
   margin:0;background:var(--paper);color:var(--body);
@@ -108,7 +113,7 @@ h2{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
   border:1px solid var(--line-firm);background:var(--card);color:var(--ink)}
 .search input::placeholder{color:var(--faint)}
 .search input:focus-visible,.fsel select:focus-visible{outline:2px solid var(--ink);outline-offset:1px}
-.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
 /* Two to a row under 380px. Five filters leave Sort alone on the last row,
    so it takes the whole row: at half width "Recently changed" was cut off by
    10px at 320px (measured). */
@@ -137,7 +142,16 @@ h2{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
    unbreakable run: one long staging path in an opened row made the whole
    page scroll sideways by 246px at 390px wide (measured by
    scripts/check-overflow.mjs). */
-.grid{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
+.grid{display:grid;grid-template-columns:minmax(0,1fr);gap:26px}
+/* One section per stage: Pending, Staging only, Live. */
+.stage{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;min-width:0}
+.stageh{margin:0;display:flex;align-items:baseline;gap:8px;min-width:0;
+  font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
+  font-size:17px;font-weight:800;letter-spacing:-.015em;color:var(--ink)}
+.stagen{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:500;color:var(--faint)}
+.stagep{margin:-8px 0 2px;font-size:13px;color:var(--faint)}
+.stagenone{margin:0;padding:12px 14px;font-size:13.5px;color:var(--faint);
+  border:1px dashed var(--line-firm);border-radius:14px}
 .site{background:var(--card);border:1px solid var(--line);border-radius:14px;
   box-shadow:var(--shadow);display:grid;
   grid-template-columns:minmax(0,1fr) auto;align-items:center;
@@ -334,6 +348,87 @@ a.addbtn{display:inline-block;text-decoration:none}
 .edbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
 .edbtns .btn{font-size:13.5px;padding:9px 16px}
 
+/* ---- go live: the row's section and its dialog ----
+   Most of the text here is the server's (check details, log lines,
+   Cloudflare's own messages) and hostnames and records are unbroken runs, so
+   every text column is minmax(0,1fr), every text child has min-width:0, and
+   every mono value wraps anywhere. */
+.glnow{margin:0;font-size:14px;line-height:1.55;color:var(--body);max-width:66ch}
+.glnow+.glnow{margin-top:3px}
+.glnow[data-bad]{color:var(--bad);font-weight:600}
+.glbtns{flex-wrap:wrap;margin-top:9px}
+
+.golive{width:min(680px,calc(100vw - 24px))}
+.golive h3:focus{outline:none}
+.golive .field>span{overflow-wrap:anywhere}
+.golive .edbtns{flex-wrap:wrap}
+.glsay{margin:0;font-size:14.5px;font-weight:600;line-height:1.5;color:var(--ink)}
+.glsay[data-bad]{color:var(--bad)}
+.glbody{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;min-width:0}
+.glbody:empty{display:none}
+.glp{margin:0;font-size:14px;line-height:1.55;color:var(--body)}
+.glp[data-bad]{color:var(--bad);font-weight:600}
+.glnote{margin:0;padding:9px 12px;border-radius:8px;font-size:13.5px;font-weight:600;
+  color:var(--open);background:var(--open-bg)}
+.glhint{display:block;font-size:12.5px;color:var(--faint)}
+.glsec{min-width:0}
+.glhead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 7px}
+.glhead .sect{margin:0}
+
+/* Checks, notes and the log: ruled rows, like the addresses in a row. */
+.gllist{margin:0;padding:0;list-style:none;display:grid;grid-template-columns:minmax(0,1fr);
+  border-top:1px solid var(--line)}
+.gllist>li{min-width:0;padding:8px 0;border-bottom:1px solid var(--line);font-size:13.5px;line-height:1.5}
+.glck{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 10px;align-items:start}
+.glck .pill{margin-top:1px}
+.glckt{min-width:0}
+.glckl{margin:0;font-weight:600;color:var(--ink)}
+.glckd{margin:2px 0 0;color:var(--body)}
+.pill-ok{color:var(--ok);background:var(--ok-bg)}
+.pill-bad{color:var(--bad);background:var(--bad-bg)}
+.pill-grey{color:var(--grey);background:var(--grey-bg)}
+.gllog>li{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 12px}
+.gltime{font-family:"JetBrains Mono",monospace;font-size:11px;line-height:1.9;color:var(--faint);white-space:nowrap}
+.gltxt{min-width:0;overflow-wrap:anywhere}
+
+/* Hostnames and records, exactly as they are, from the structured fields. */
+.glvals{margin:4px 0 0;padding:0;list-style:none;display:grid;grid-template-columns:minmax(0,1fr);gap:3px}
+.glvals>li{min-width:0}
+.glv{font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--ink);overflow-wrap:anywhere}
+.glplan{margin:0;display:grid;grid-template-columns:minmax(0,1fr);border-top:1px solid var(--line)}
+.glprow{display:grid;grid-template-columns:140px minmax(0,1fr);gap:2px 12px;padding:8px 0;
+  border-bottom:1px solid var(--line)}
+.glprow dt{font-size:13px;font-weight:600;color:var(--ink)}
+.glprow dd{margin:0;min-width:0;font-size:13.5px}
+.glprow dd>.glvals:first-child{margin-top:0}
+@media (max-width:519px){.glprow{grid-template-columns:minmax(0,1fr)}}
+
+/* The pair, the acknowledgements: a box and a sentence that wraps beside it. */
+.glcheck{display:flex;align-items:flex-start;gap:9px;min-width:0;font-size:13.5px;line-height:1.5;
+  color:var(--ink);cursor:pointer}
+.glcheck input{flex:0 0 auto;width:16px;height:16px;margin:3px 0 0;accent-color:var(--ink);cursor:pointer}
+.glcheck>span{min-width:0;overflow-wrap:anywhere}
+.glcheck .mono{font-size:12.5px}
+.glacks{margin:0;padding:0;border:0;min-width:0;display:grid;grid-template-columns:minmax(0,1fr);gap:9px}
+.glacks legend{padding:0}
+
+.glbox{padding:11px 13px;border-radius:10px;background:var(--open-bg)}
+.glbox .sect{color:var(--open)}
+.glrec{margin:0;padding:11px 13px;border-radius:10px;border:1px solid var(--line);background:var(--sunk);
+  font-family:"JetBrains Mono",monospace;font-size:12px;line-height:1.6;color:var(--ink);
+  white-space:pre-wrap;overflow-wrap:anywhere}
+.glrec+.glhint{margin-top:5px}
+.glpoll{margin:8px 0 0;font-size:12.5px;color:var(--faint)}
+.glpoll[data-bad]{color:var(--bad);font-weight:600}
+
 footer{margin-top:46px;padding-top:18px;border-top:1px solid var(--line);
   font-size:12.5px;color:var(--faint)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* iPhone Safari zooms the whole page in when a text box or menu smaller than
+   16px is tapped, and leaves it zoomed: the page then pans sideways as it
+   scrolls. At 16px it never zooms. Touch screens only, so the desktop keeps
+   its tighter type. scripts/check-overflow.mjs checks this on a phone. */
+@media (pointer:coarse){
+  input,select,textarea{font-size:16px!important}
+}

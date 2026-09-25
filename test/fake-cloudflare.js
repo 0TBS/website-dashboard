@@ -1,6 +1,7 @@
-// In-memory stand-ins for the Cloudflare API and for the sites the desk
-// fetches, so whole go-live and roll-back runs can be tested without touching
-// a real zone. Not a test file itself (no .test.js): the tests import it.
+// In-memory stand-ins for the Cloudflare API, the sites the desk fetches and
+// public DNS, so whole go-live and roll-back runs can be tested without
+// touching a real zone. Not a test file itself (no .test.js): the tests
+// import it.
 //
 // The Cloudflare fake answers every endpoint src/cloudflare.js calls, with the
 // same envelopes and the rules that matter for going live:
@@ -14,7 +15,12 @@
 //     record stays for that many more requests that look at its name (a DNS
 //     listing, a record create or an attach), the way Cloudflare sometimes
 //     takes a moment;
-//   - the redirect entry point answers 404 until the first rule creates it.
+//   - the redirect entry point answers 404 until the first rule creates it;
+//   - a record is refused (400) when it carries flatten_cname and is proxied,
+//     or ipv4_only / ipv6_only and is DNS only, whatever the value: the docs
+//     say those settings do not apply there, so the client must never send
+//     them, not even as false;
+//   - a DNS listing gives at most 5,000 records a page.
 // Codes 100117, 81053, 81057, 81044, 7000, 7003, 10000 and 10007 are the ones
 // Cloudflare is reported to send; the others are stand-ins, since the docs
 // quote none for those cases.
@@ -22,10 +28,22 @@
 // A PUT on a ruleset is refused with 405 on purpose. The real API accepts it
 // and replaces every rule in the zone, which the desk must never do, so here
 // it fails loudly; tests also check `calls` for it.
+//
+// Below it: a fake for the sites the desk fetches, one for the two public DNS
+// resolvers, and combineFetches() to put them all behind one fetch, the way
+// the Worker has one fetch for everything.
 
 const BASE = 'https://api.cloudflare.com/client/v4';
 const WEBSITE = ['A', 'AAAA', 'CNAME'];
 const REDIRECT_PHASE = 'http_request_dynamic_redirect';
+const NAME_SERVERS = ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'];
+const PLAN_NAMES = { free: 'Free Website', pro: 'Pro Website', business: 'Business Website', enterprise: 'Enterprise Website' };
+
+// 'pro' -> the plan object a zone carries; an object is taken as it is, so a
+// test can give a plan without a legacy_id.
+const planFor = (plan) => (typeof plan === 'string'
+  ? { id: 'plan-' + plan, name: PLAN_NAMES[plan] ?? plan, legacy_id: plan }
+  : { ...plan });
 
 const json = (status, body) => new Response(JSON.stringify(body), {
   status, headers: { 'content-type': 'application/json' },
@@ -38,8 +56,8 @@ const fail = (status, code, message, chain) => json(status, {
   result: null,
 });
 
-function paged(list, query, perPageDefault) {
-  const perPage = Math.max(Number(query.per_page) || perPageDefault, 1);
+function paged(list, query, perPageDefault, perPageMax = Infinity) {
+  const perPage = Math.min(Math.max(Number(query.per_page) || perPageDefault, 1), perPageMax);
   const page = Math.max(Number(query.page) || 1, 1);
   const result = list.slice((page - 1) * perPage, page * perPage);
   return {
@@ -55,13 +73,16 @@ const inZone = (host, zone) => host === zone.name || host.endsWith('.' + zone.na
 
 export function createFakeCloudflare({
   accountId = 'account-1',
-  zones = [],        // [{ id?, name, status = 'active', paused = false, account_id? }]
+  // [{ id?, name, status = 'active', paused = false, account_id?, type = 'full',
+  //    plan = 'free' (or a plan object, or null for none), name_servers? }]
+  zones = [],
   records = [],      // [{ zone_id?, type, name, content, ttl?, proxied?, comment?, tags?, settings?, meta?, priority? }]
   domains = [],      // [{ id?, hostname, service, zone_id? }]: each also gets its Worker record
-  workers = [],      // Worker names; services in `domains` and keys of `secrets` are added
+  workers = [],      // Worker names; services in `domains`, keys of `secrets` and route scripts are added
   secrets = {},      // { workerName: ['SECRET_NAME', ...] }
   sslMode = 'full',  // one mode for every zone, or { zoneId: mode }
   rulesets = [],     // [{ zone_id, id?, name?, phase = redirect phase, rules: [...] }]
+  routes = [],       // Worker routes: [{ id?, zone_id?, pattern, script? }]
   detachLag = 0,
 } = {}) {
   let counter = 0;
@@ -82,8 +103,10 @@ export function createFakeCloudflare({
       name: z.name.toLowerCase(),
       status: z.status || 'active',
       paused: !!z.paused,
-      type: 'full',
+      type: z.type || 'full',
       account: { id: z.account_id || accountId },
+      ...(z.plan !== null && { plan: planFor(z.plan ?? 'free') }),
+      name_servers: [...(z.name_servers || NAME_SERVERS)],
     })),
     records: [],
     domains: [],
@@ -91,6 +114,7 @@ export function createFakeCloudflare({
     secrets: { ...secrets },
     sslMode,
     rulesets: [],
+    routes: [],
     detachLag,
   };
   const lingering = new Map(); // record id -> listings left before it goes
@@ -207,6 +231,21 @@ export function createFakeCloudflare({
   const publicRuleset = ({ zone_id, ...rs }) => rs;
   const entrypoint = (zoneId, phase) => state.rulesets.find((rs) => rs.zone_id === zoneId && rs.kind === 'zone' && rs.phase === phase);
 
+  // Why a record's settings are refused, or null. The key alone is enough:
+  // sending { flatten_cname: false } on a proxied record is still sending a
+  // setting where it does not apply.
+  function settingsProblem(type, proxied, settings) {
+    if (settings == null) return null;
+    if (typeof settings !== 'object' || Array.isArray(settings)) return 'settings must be an object.';
+    if (proxied && 'flatten_cname' in settings) {
+      return 'flatten_cname is unavailable for proxied records, since they are always flattened.';
+    }
+    if (!proxied && ('ipv4_only' in settings || 'ipv6_only' in settings)) {
+      return `ipv4_only and ipv6_only apply only to proxied records, and this ${type} record is DNS only.`;
+    }
+    return null;
+  }
+
   // What a redirect rule must hold before Cloudflare will save it.
   function ruleProblem(r) {
     if (!r || typeof r !== 'object') return 'a rule must be an object';
@@ -234,6 +273,14 @@ export function createFakeCloudflare({
     if (!zone) throw new Error('fake-cloudflare: no zone ' + rs.zone_id + ' for a ruleset');
     state.rulesets.push(makeRuleset(zone, rs));
   }
+  // "*.example.com/*" belongs to example.com.
+  for (const r of routes) {
+    const host = String(r.pattern).split('/')[0].toLowerCase().replace(/^\*\.?/, '');
+    const zone = r.zone_id ? zoneById(r.zone_id) : zoneFor(host);
+    if (!zone) throw new Error('fake-cloudflare: no zone for route ' + r.pattern);
+    state.routes.push({ id: r.id || newId('7'), zone_id: zone.id, pattern: r.pattern, ...(r.script && { script: r.script }) });
+    if (r.script) state.workers.add(r.script);
+  }
 
   // --- Endpoints ---
 
@@ -251,7 +298,7 @@ export function createFakeCloudflare({
     const name = q.name ?? q['name.exact'];
     if (name) list = list.filter((r) => r.name === name.toLowerCase());
     if (q.type) list = list.filter((r) => r.type === q.type);
-    const { result, result_info } = paged(list, q, 100);
+    const { result, result_info } = paged(list, q, 100, 5000);
     seen(result);
     return ok(result, { result_info });
   }
@@ -264,6 +311,8 @@ export function createFakeCloudflare({
     if (type === 'A' && !/^\d{1,3}(\.\d{1,3}){3}$/.test(body.content)) {
       return fail(400, 1004, 'DNS Validation Error', [{ code: 9005, message: 'Content for A record must be a valid IPv4 address.' }]);
     }
+    const problem = settingsProblem(type, WEBSITE.includes(type) && !!body.proxied, body.settings);
+    if (problem) return fail(400, 1004, 'DNS Validation Error', [{ code: 9041, message: problem }]);
     const name = fqdn(body.name, zone);
     const here = recordsAt(zone.id, name);
     seen(here);
@@ -330,6 +379,10 @@ export function createFakeCloudflare({
     return ok(null);
   }
 
+  function listRoutes(zone) {
+    return ok(state.routes.filter((r) => r.zone_id === zone.id).map(({ zone_id, ...r }) => r));
+  }
+
   function listSecrets(script) {
     if (!state.workers.has(script)) return fail(404, 10007, 'This Worker does not exist on your account.');
     return ok((state.secrets[script] || []).map((name) => ({ name, type: 'secret_text' })));
@@ -385,12 +438,13 @@ export function createFakeCloudflare({
 
   const ZONE = '/zones/(?<zone>[^/]+)';
   const ACCOUNT = '/accounts/(?<account>[^/]+)';
-  const routes = [
+  const endpoints = [
     ['GET', '/zones', (m, q) => listZones(q)],
     ['GET', ZONE + '/dns_records', (m, q, z) => listRecords(z, q)],
     ['POST', ZONE + '/dns_records', (m, q, z, b) => createRecord(z, b)],
     ['DELETE', ZONE + '/dns_records/(?<id>[^/]+)', (m, q, z) => deleteRecord(z, m.id)],
     ['GET', ZONE + '/settings/ssl', (m, q, z) => sslSetting(z)],
+    ['GET', ZONE + '/workers/routes', (m, q, z) => listRoutes(z)],
     ['GET', ZONE + '/rulesets/phases/(?<phase>[^/]+)/entrypoint', (m, q, z) => getEntrypoint(z, m.phase)],
     ['POST', ZONE + '/rulesets', (m, q, z, b) => createRuleset(z, b)],
     ['POST', ZONE + '/rulesets/(?<rs>[^/]+)/rules', (m, q, z, b) => addRule(z, m.rs, b)],
@@ -402,7 +456,7 @@ export function createFakeCloudflare({
   ].map(([method, pattern, handle]) => ({ method, re: new RegExp('^' + pattern + '$'), handle }));
 
   function route(method, path, query, body) {
-    const matches = routes.map((r) => ({ r, m: path.match(r.re) })).filter((x) => x.m);
+    const matches = endpoints.map((r) => ({ r, m: path.match(r.re) })).filter((x) => x.m);
     if (!matches.length) return fail(400, 7000, 'No route for that URI');
     const hit = matches.find((x) => x.r.method === method);
     if (!hit) return fail(405, 7001, `Method ${method} not available for that URI.`);
@@ -457,6 +511,7 @@ export function createFakeCloudflare({
 
   return {
     fetch: fetchFake,
+    claims: (url) => url.href.startsWith(BASE + '/'),
     state,
     calls,
     // The next `times` requests whose method and path match fail with this
@@ -518,5 +573,160 @@ export function createFakeSites(pages = {}) {
     return go(url, init, 0);
   }
 
-  return { fetch: fetchSite, pages, calls };
+  const claims = (url) => Object.keys(pages).some((k) => new URL(k).host === url.host);
+
+  return { fetch: fetchSite, claims, pages, calls };
+}
+
+// --- Public DNS over HTTPS ---
+
+// The two resolvers the desk asks, and the path each answers JSON on.
+const RESOLVERS = { 'dns.google': '/resolve', 'cloudflare-dns.com': '/dns-query' };
+const TYPES = { A: 1, NS: 2, CNAME: 5, SOA: 6, PTR: 12, MX: 15, TXT: 16, AAAA: 28, SRV: 33, CAA: 257 };
+const TYPE_NAMES = Object.fromEntries(Object.entries(TYPES).map(([k, v]) => [String(v), k]));
+
+const bare = (name) => String(name).toLowerCase().replace(/\.$/, '');
+const dotted = (name) => (name.endsWith('.') ? name : name + '.');
+
+// Record data the way each resolver writes it: host names end in a dot, MX
+// is "10 mx.example.net.", and cloudflare-dns.com quotes TXT where dns.google
+// does not. Tests give plain values.
+function dataFor(resolver, type, data) {
+  if (['NS', 'CNAME', 'PTR'].includes(type)) return dotted(data);
+  if (type === 'MX') return data.replace(/^(\d+\s+)(\S+)$/, (m, prio, host) => prio + dotted(host));
+  if (type === 'TXT') {
+    const plain = data.replace(/^"(.*)"$/s, '$1');
+    return resolver === 'cloudflare-dns.com' ? `"${plain}"` : plain;
+  }
+  return data;
+}
+
+// dns.google and cloudflare-dns.com answering DoH JSON queries:
+//   GET https://dns.google/resolve?name=<name>&type=<type>
+//   GET https://cloudflare-dns.com/dns-query?name=<name>&type=<type>
+//       (with accept: application/dns-json or ct=application/dns-json, or it
+//       answers 400 like the real one)
+// Each resolver is given a table, { 'example.com': { NS: ['ada.ns.cloudflare.com'],
+// A: '192.0.2.10', MX: ['10 mx.example.net'] }, 'www.example.com': { CNAME:
+// 'example.com' } }, where a value is data, { data, TTL }, or a list of them.
+// Answers are { Status: 0, Answer: [{ name, type, TTL, data }] } with the type
+// as a number, as the real ones are:
+//   - a name not in the table is NXDOMAIN (Status 3, no Answer);
+//   - a name without the asked type answers Status 0 and no Answer at all;
+//   - a CNAME is followed, so an A query for www returns the CNAME and then
+//     the A records of its target;
+//   - dns.google ends names with a dot, cloudflare-dns.com does not.
+// A resolver given a function (url, init) answers with what it returns (a
+// Response or a JSON body such as { Status: 2 }) or fails like the network if
+// it throws. A resolver given nothing cannot be reached. `answers` stays
+// live: tests change it between calls, directly or with set().
+export function createFakeDoh(answers = {}) {
+  const calls = [];
+
+  function lookup(table, resolver, qname, type) {
+    const nodes = new Map(Object.entries(table).map(([k, v]) => [bare(k), v]));
+    const list = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
+    const entry = (name, t, v) => ({
+      name: resolver === 'dns.google' ? name + '.' : name,
+      type: TYPES[t],
+      TTL: v?.TTL ?? 300,
+      data: dataFor(resolver, t, String(v?.data ?? v)),
+    });
+    const Answer = [];
+    let name = qname;
+    for (let hop = 0; hop < 10; hop++) {
+      const node = nodes.get(name);
+      if (!node) return { Status: 3, Answer };
+      const [cname] = type === 'CNAME' ? [] : list(node.CNAME);
+      if (cname == null) {
+        Answer.push(...list(node[type]).map((v) => entry(name, type, v)));
+        return { Status: 0, Answer };
+      }
+      Answer.push(entry(name, 'CNAME', cname));
+      name = bare(cname?.data ?? cname);
+    }
+    return { Status: 2, Answer }; // a CNAME loop: SERVFAIL
+  }
+
+  function reply(resolver, status, body) {
+    const type = resolver === 'cloudflare-dns.com' ? 'application/dns-json' : 'application/json; charset=UTF-8';
+    return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': type } });
+  }
+
+  async function fetchDoh(input, init = {}) {
+    if (init.signal?.aborted) throw init.signal.reason;
+    const url = new URL(input.url ?? String(input));
+    const resolver = url.hostname;
+    const headers = new Headers(init.headers ?? input.headers);
+    const q = url.searchParams;
+    calls.push({ resolver, url: url.href, name: q.get('name'), type: q.get('type'), accept: headers.get('accept') });
+    const table = answers[resolver];
+    if (!Object.hasOwn(RESOLVERS, resolver) || table == null) {
+      throw new TypeError('fetch failed', { cause: new Error('connect ETIMEDOUT ' + resolver) });
+    }
+    if (url.pathname !== RESOLVERS[resolver]) return reply(resolver, 404, 'Not Found');
+    if (typeof table === 'function') {
+      const out = await table(url, init);
+      return out instanceof Response ? out : reply(resolver, 200, out);
+    }
+    const json = /application\/dns-json/.test(headers.get('accept') || '') || q.get('ct') === 'application/dns-json';
+    if (resolver === 'cloudflare-dns.com' && !json) return reply(resolver, 400, 'Bad Request');
+    const asked = String(q.get('type') || 'A').toUpperCase();
+    const type = TYPE_NAMES[asked] ?? asked;
+    if (!q.get('name') || !TYPES[type]) return reply(resolver, 400, { Status: 1, Comment: 'Bad name or type.' });
+    const qname = bare(q.get('name'));
+    const { Status, Answer } = lookup(table, resolver, qname, type);
+    return reply(resolver, 200, {
+      Status, TC: false, RD: true, RA: true, AD: false, CD: false,
+      Question: [{ name: resolver === 'dns.google' ? qname + '.' : qname, type: TYPES[type] }],
+      ...(Answer.length && { Answer }),
+    });
+  }
+
+  return {
+    fetch: fetchDoh,
+    claims: (url) => Object.hasOwn(RESOLVERS, url.hostname),
+    answers,
+    calls,
+    // What name + type answers from now on: on every resolver that has a
+    // table, or on `only` alone, which gets a table if it has none. null
+    // removes the answer.
+    set(name, type, values, only) {
+      const isTable = (t) => t !== null && typeof t === 'object';
+      for (const r of only ? [only] : Object.keys(RESOLVERS)) {
+        if (only && !isTable(answers[r])) answers[r] = {};
+        const table = answers[r];
+        if (!isTable(table)) continue;
+        const node = (table[bare(name)] ??= {});
+        if (values == null) delete node[type]; else node[type] = values;
+      }
+    },
+  };
+}
+
+// --- One fetch for all of them ---
+
+// Puts several fakes behind one fetch, so one counted fetch can wrap them all
+// the way it wraps the Worker's fetch. Each part is a fake from this file,
+// which knows its own URLs, or [match, fetch] for anything else (the Access
+// certs, say), where match is a hostname, a RegExp tried on the whole URL, or
+// (url) => boolean. The first part that claims a URL answers it; a URL no
+// part claims fails like a DNS lookup. `calls` lists every call in order.
+export function combineFetches(...parts) {
+  const claimer = (match) => {
+    if (typeof match === 'function') return match;
+    if (match instanceof RegExp) return (url) => match.test(url.href);
+    return (url) => url.hostname === match;
+  };
+  const owners = parts.map((p) => (Array.isArray(p) ? { claims: claimer(p[0]), fetch: p[1] } : p));
+  const calls = [];
+  async function fetchAll(input, init = {}) {
+    const url = new URL(input.url ?? String(input));
+    calls.push({ url: url.href, method: (init.method || input.method || 'GET').toUpperCase() });
+    const part = owners.find((o) => o.claims(url));
+    if (!part) throw new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND ' + url.hostname) });
+    return part.fetch(input, init);
+  }
+  fetchAll.calls = calls;
+  return fetchAll;
 }
