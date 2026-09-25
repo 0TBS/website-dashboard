@@ -30,6 +30,8 @@ The Edit dialog sends only the fields you changed. If a teammate saved the same 
 - **`src/sites.js`** is the one place that defines a site record: its fields, what each one may hold, and how input is cleaned. For example, `https://www.Example.com/` becomes `www.example.com`, and a GitHub link becomes `owner/repo`.
 - **The page** is plain HTML, CSS and JS in `public/`, with no framework and no build step.
 - **Privacy**: the list sits behind a shared desk key (`DASH_KEY`). With no key set, nobody can get in: the desk refuses every request rather than showing the list openly. `public/_headers` sends `X-Robots-Tag: noindex` and a strict Content-Security-Policy. Workers Logs drop query strings.
+- **Staying logged in** (`src/session.js`): the key is typed once. The Worker checks it and sets a login cookie in its place, and the browser stays logged in until someone presses **Log off**. The cookie is `HttpOnly`, so no script can read it, and `SameSite=Strict`. It holds a value made from the key, never the key itself. It lasts 400 days, the longest any browser allows, and every visit restarts that clock. The Worker sets it, not the page, so Safari does not clear it after seven days the way it clears `localStorage`. A browser that saved the key the old way, in `localStorage`, logs in with it once and then deletes it.
+- **Changes need the desk's own page**: a logged-in browser sends its cookie even on requests that another `*.10xid.com` page starts. So a change sent with the cookie must also carry an `x-desk: 1` header. Only the desk's page adds it, and another site cannot add it without the Worker's permission, which the Worker never gives.
 - **HTTPS only**: the 10xid.com zone's "Always Use HTTPS" is off, and turning it on would change every client host on the zone. So this Worker enforces HTTPS itself. It sees every request (`run_worker_first: true`), redirects plain-HTTP pages to HTTPS, refuses plain-HTTP API calls, and sends HSTS for this host only.
 
 ## Run it locally
@@ -79,7 +81,7 @@ npx wrangler deploy
 
 This needs a Cloudflare API token that can edit Workers on that account.
 
-To let someone in, share the key. To lock everyone out, rotate it by setting a new value:
+To let someone in, share the key. To lock everyone out, rotate it by setting a new value. That also logs out every browser that is logged in, and each one is asked for the new key:
 
 ```sh
 openssl rand -hex 24 | npx wrangler secret put DASH_KEY
@@ -97,10 +99,12 @@ curl -s https://website.10xid.com/api/sites -H "Authorization: Bearer $DASH_KEY"
 
 ## API
 
-Every request needs `Authorization: Bearer <DASH_KEY>`.
+Scripts send `Authorization: Bearer <DASH_KEY>` with every request. The page uses the login cookie instead.
 
 | Method | Path | Body | Result |
 | --- | --- | --- | --- |
+| POST | `/api/session` | `{ "key": "..." }` | `{ loggedIn: true }` and the login cookie, or `401 { code: "bad-key" }` |
+| DELETE | `/api/session` | – | `{ loggedIn: false }` and the cookie cleared (Log off) |
 | GET | `/api/sites` | – | `{ sites: [...] }` |
 | POST | `/api/sites` | a site (`name` required) | `201 { site }` |
 | PATCH | `/api/sites/:id` | only the fields to change, optionally `expected_updated_at` | `{ site }`, or `409 { code: "conflict", site }` if the row changed since that time |

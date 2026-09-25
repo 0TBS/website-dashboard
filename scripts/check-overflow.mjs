@@ -145,8 +145,13 @@ function measure() {
 
 // ---- the states a person can put the page in ----
 async function gotoDesk(page, base, withKey) {
+  await page.context().clearCookies();
   await page.goto(base + '/');
-  await page.evaluate((k) => { try { if (k) localStorage.setItem('webdesk.key', k); else localStorage.clear(); } catch {} }, withKey ? KEY : null);
+  if (withKey) {
+    await page.evaluate((k) => fetch('/api/session', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: k }),
+    }), KEY);
+  }
   await page.reload();
   await page.evaluate(() => document.fonts.ready);
   await page.waitForFunction(() => !/Loading/.test(document.getElementById('note').textContent) || !document.getElementById('gate').hidden);

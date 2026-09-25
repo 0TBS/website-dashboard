@@ -69,7 +69,8 @@ h1{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
   font-size:clamp(28px,6.5vw,40px);font-weight:800;letter-spacing:-.025em;
   line-height:1.02;color:var(--ink);margin:0;text-wrap:balance}
 .lede{flex:1 1 280px;margin:0;font-size:14.5px;color:var(--muted);max-width:46ch}
-.crosslink{margin:0}
+.crosslink{margin:0;display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px}
+.crosslink .linkbtn{font-size:13.5px;font-weight:600;padding:8px 0;touch-action:manipulation}
 .addbtn{font-size:13.5px;font-weight:600;cursor:pointer;
   color:var(--paper);background:var(--ink);border:1px solid var(--ink);
   border-radius:999px;padding:8px 15px;touch-action:manipulation}
@@ -335,5 +336,4 @@ a.addbtn{display:inline-block;text-decoration:none}
 
 footer{margin-top:46px;padding-top:18px;border-top:1px solid var(--line);
   font-size:12.5px;color:var(--faint)}
-footer .linkbtn{display:inline;margin-left:4px;color:var(--faint)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}

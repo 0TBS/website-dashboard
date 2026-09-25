@@ -19,7 +19,10 @@
       <h1>The Website Desk</h1>
     </div>
     <p class="lede">Every client site we look after and where each one stands: what it runs on, whether it has an Astro staging build, whose domain it is, and whether it still needs SEO and PPC work. Change anything here and everyone sees the same list.</p>
-    <p class="crosslink"><button class="addbtn" type="button" id="add">+ Add a site</button></p>
+    <p class="crosslink">
+      <button class="addbtn" type="button" id="add">+ Add a site</button>
+      <button class="linkbtn" type="button" id="logoff" hidden>Log off</button>
+    </p>
   </header>
 
   <!-- Each number is also a filter: tap it to see just those sites, tap again to see them all. -->
@@ -77,7 +80,7 @@
   <section class="gate" id="gate" hidden>
     <form id="gateform">
       <h3 class="emptyh">This desk is private</h3>
-      <p class="emptyp" id="gatemsg">Enter the desk key to see the list. This browser will remember it.</p>
+      <p class="emptyp" id="gatemsg">Enter the desk key to see the list. This browser stays logged in until you log off.</p>
       <div class="gaterow">
         <label class="sr" for="gatekey">Desk key</label>
         <input id="gatekey" type="password" autocomplete="current-password" required>
@@ -88,7 +91,6 @@
 
   <footer>
     The list lives in the desk's own database and sits behind the desk key. Nothing here is indexed.
-    <button class="linkbtn" type="button" id="lock">Forget the key on this browser</button>
   </footer>
 </div>
 

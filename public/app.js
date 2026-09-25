@@ -40,20 +40,21 @@ const filters = { q: '', platform: '', staging: '', domain: '', seo: '' };
 let sort = 'name';
 
 // ---- storage: a convenience, never a requirement ----
-// Private windows throw on localStorage; the key is then kept for this visit.
-let memKey = '';
+// Private windows throw on localStorage. The key itself is not kept here: the
+// Worker's login cookie is (see src/session.js).
 function readStore(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function writeStore(k, v) {
   try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch { /* not fatal */ }
 }
-const deskKey = () => memKey || readStore(KEY_STORE) || '';
 
 // ---- the API ----
 class Locked extends Error {
   constructor(message, code) { super(message); this.code = code; }
 }
+// The browser sends the login cookie by itself. x-desk marks the request as
+// coming from this page, which the Worker requires before it accepts a change.
 async function api(method, path, body) {
-  const opts = { method, headers: { authorization: 'Bearer ' + deskKey() } };
+  const opts = { method, headers: { 'x-desk': '1' } };
   if (body !== undefined) {
     opts.headers['content-type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -655,39 +656,56 @@ document.querySelectorAll('.stat').forEach((btn) => {
 
 // ---- the key ----
 const gate = $('gate');
-// `why` is the Locked error from the API, or nothing when the key was just
-// forgotten on purpose.
+const GATE_MSG = {
+  'no-key-configured': 'This desk has no key set yet, so nobody can open it. Set DASH_KEY on the Worker (see the README), then enter it here.',
+  'bad-key': 'That is not the desk key. Check it and try again.',
+  'stale-session': 'The desk key has changed since this browser logged in. Enter the new key.',
+};
+// `why` is the Locked error from the API, or nothing after Log off.
 function lock(why) {
   loaded = false;
   sites = [];
   grid.innerHTML = '';
   $('tools').hidden = true;
+  $('logoff').hidden = true;
   note.textContent = '';
   dock.hidden = true;
   renderStats();
-  $('gatemsg').textContent =
-    why && why.code === 'no-key-configured'
-      ? 'This desk has no key set yet, so nobody can open it. Set DASH_KEY on the Worker (see the README), then enter it here.'
-      : why && deskKey()
-        ? why.message + ' Enter the desk key again.'
-        : 'Enter the desk key to see the list. This browser will remember it.';
+  $('gatemsg').textContent = (why && GATE_MSG[why.code])
+    || 'Enter the desk key to see the list. This browser stays logged in until you log off.';
   gate.hidden = false;
   $('gatekey').focus();
 }
-$('gateform').addEventListener('submit', (e) => {
+$('gateform').addEventListener('submit', async (e) => {
   e.preventDefault();
   const k = $('gatekey').value.trim();
   if (!k) return;
-  memKey = k;
-  writeStore(KEY_STORE, k);
+  try { await api('POST', '/api/session', { key: k }); } catch (ex) {
+    if (ex instanceof Locked) lock(ex); else $('gatemsg').textContent = ex.message;
+    return;
+  }
   $('gatekey').value = '';
   load();
 });
-$('lock').addEventListener('click', () => {
-  memKey = '';
-  writeStore(KEY_STORE, '');
+$('logoff').addEventListener('click', async () => {
+  try { await api('DELETE', '/api/session'); } catch (ex) {
+    if (!(ex instanceof Locked)) { note.textContent = ex.message; return; }
+  }
   lock(null);
 });
+
+// Before the login cookie, the key sat in localStorage. A browser that still
+// has it logs in with it once, so nobody is asked again, and then drops it.
+async function adoptSavedKey() {
+  const old = readStore(KEY_STORE);
+  if (!old) return;
+  try {
+    await api('POST', '/api/session', { key: old });
+    writeStore(KEY_STORE, '');
+  } catch (ex) {
+    if (ex instanceof Locked) writeStore(KEY_STORE, '');   // a wrong key is no use; a network error might be
+  }
+}
 
 // ---- loading ----
 async function load({ quiet = false } = {}) {
@@ -700,6 +718,7 @@ async function load({ quiet = false } = {}) {
     loaded = true;
     gate.hidden = true;
     $('tools').hidden = false;
+    $('logoff').hidden = false;
     if (first || changed) renderGrid();
   } catch (e) {
     if (e instanceof Locked) { lock(e); return; }
@@ -718,4 +737,4 @@ document.addEventListener('visibilitychange', () => {
 $('host').textContent = location.host || 'website desk';
 const savedSort = readStore(SORT_STORE);
 if (savedSort && SORTS[savedSort]) { sort = savedSort; $('f-sort').value = sort; }
-load();
+adoptSavedKey().then(() => load());
