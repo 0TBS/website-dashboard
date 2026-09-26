@@ -841,7 +841,7 @@ function glApplySite(site) {
 }
 
 // ---- drawing the dialog ----
-const glBtn = (act, word, cls = '') => `<button class="btn${cls}" type="button" data-act="${act}">${word}</button>`;
+const glBtn = (act, word = 'Close', cls = '') => `<button class="btn${cls}" type="button" data-act="${act}">${word}</button>`;
 const glSection = (title, inner) => `<section class="glsec"><p class="sect">${esc(title)}</p>${inner}</section>`;
 const glValues = (list) => `<ul class="glvals">${list.map((t) => `<li class="glv">${esc(t)}</li>`).join('')}</ul>`;
 

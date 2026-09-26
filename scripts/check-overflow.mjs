@@ -435,6 +435,11 @@ function measure() {
       && n.getBoundingClientRect().width && parseFloat(getComputedStyle(n).fontSize) < 16) {
       spill.push({ el: describe(n), over: 0, text: getComputedStyle(n).fontSize, why: 'under 16px: a phone zooms in on tap' });
     }
+    // A label built from a value that was never set reads "undefined" or
+    // "null" on screen. Not a layout fault, but this check sees every state.
+    if (!n.children.length && /^(undefined|null|NaN)$/.test((n.textContent || '').trim())) {
+      spill.push({ el: describe(n), over: 0, text: n.textContent.trim(), why: 'shows a missing value' });
+    }
     if (n.matches('input, textarea')) continue;            // text boxes scroll their own text
     const r = n.getBoundingClientRect();
     if (!r.width) continue;                                // not rendered
