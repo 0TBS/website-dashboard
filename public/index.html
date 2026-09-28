@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/styles.css">
 <script src="/app.js" defer></script>
+<script src="/details.js" defer></script>
 </head>
 <body>
 <div class="wrap">
@@ -145,6 +146,21 @@
     <div class="edbtns">
       <button class="btn" type="button" id="ed-cancel">Cancel</button>
       <button class="btn open" type="submit" id="ed-save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Add or edit a service, contact or domain. The fields are drawn by
+     details.js for the kind being edited. -->
+<dialog class="editor" id="dt-editor" aria-labelledby="dt-title">
+  <form id="dtform" novalidate>
+    <h3 id="dt-title">Add a service</h3>
+    <p class="dthint" id="dt-hint" hidden></p>
+    <div class="dtfields" id="dt-fields"></div>
+    <p class="ederr" id="dterr" role="alert" hidden></p>
+    <div class="edbtns">
+      <button class="btn" type="button" id="dt-cancel">Cancel</button>
+      <button class="btn open" type="submit" id="dt-save">Save</button>
     </div>
   </form>
 </dialog>

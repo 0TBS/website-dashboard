@@ -15,17 +15,25 @@
 //                                           measures what is there and writes
 //                                           nothing
 //
+// Locally the Worker needs a database too (it reads DATABASE_URL). The check
+// makes a fresh one with a random name on the Postgres server at
+// CHECK_PG_URL (default postgres://desk@127.0.0.1:5433/postgres), as a user
+// allowed to CREATE DATABASE, hands it to `wrangler dev`, and drops it at the
+// end, pass or fail. A deployed desk (DESK_URL) needs none of this.
+//
 // Optional: CHROMIUM_PATH (a browser to use instead of Playwright's own),
 // CHROMIUM_ARGS (extra launch flags), ALLOW_FALLBACK_FONTS=1 (measure even if
 // the web fonts did not load — otherwise that fails, because fallback fonts
 // have different widths and a pass measured with them proves nothing).
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
 import { chromium } from 'playwright';
+import pg from 'pg';
 import { goliveSummary } from '../src/golive-store.js';
 
 // Widths up to this one are measured as a touch-screen phone.
@@ -371,6 +379,97 @@ async function mockGoLive(page, target, { golive = null, answers = {} } = {}) {
 // The site as an answer carries it: with the summary of the row it answers.
 const withRow = (site, row) => ({ ...site, golive: glSummary(row) });
 
+// ---- a site's services, contacts, domains and history ----
+// Given to the longest-named site, each at or near src/details.js's limits:
+// identifiers and links that are one unbroken run, an email address of 120
+// characters, a 100-character hostname, a renewal date that has passed and
+// one that is close. Then a few changes and a removal, so the history has
+// long values in it as well.
+const dayFrom = (days) => new Date(Date.now() + days * DAY).toISOString().slice(0, 10);
+const LONG_EMAIL = ('alexandra.konstantinopoulou.vandenberghe.accounts.payable.and.website'
+  + '@supercalifragilistic-renovations.example.com').slice(0, 120);
+const LONG_LINK = ('https://analytics.google.com/analytics/web/#/p123456789/reports/explorer?params=_u..nav%3Dmaui'
+  + '%26_r.explorerCard..selmet%3D%5B%22sessions%22%5D%26_r.explorerCard..seldim%3D%5B%22sessionDefaultChannelGrouping%22%5D'
+  + '%26_u.dateOption%3Dlast28Days%26_u.comparisonOption%3Ddisabled&r=lifecycle-traffic-acquisition-v2&collectionId=life-cycle').slice(0, 290);
+const DETAILS = {
+  services: [
+    { kind: 'ga4', identifier: 'G-' + 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'.repeat(6).slice(0, 198), url: LONG_LINK,
+      account: LONG_EMAIL, notes: LONG_LINK + '\n\nThe property was moved from the old Universal Analytics account in 2023.' },
+    { kind: 'backblaze_bucket', identifier: 'supercalifragilistic-renovations-and-millwork-media-bucket-2026',
+      account: "The agency's Backblaze account: the login is in the shared vault, never here" },
+    { kind: 'business_profile' },
+  ],
+  contacts: [
+    { name: 'Alexandra-Konstantinopoulou-Vandenberghe-Supercalifragilisticexpialidocious-Renovations-Owner-and-Director'.slice(0, 120),
+      role: 'Owner, general manager, and the person who signs off every change to the website, the ads and the domain',
+      email: LONG_EMAIL, phone: '+1 (416) 555-0199 ext. 12345', notes: 'Prefers email. '.repeat(30).trim() },
+    { name: 'Ana Lee', email: 'ana@example.com' },
+  ],
+  domains: [
+    { hostname: GL_MAIN, role: 'live', registrar: 'Supercalifragilistic-Domain-Registrations-and-Hosting-Services-International',
+      dns_on_cloudflare: true, renews_on: dayFrom(-40), notes: 'Registered by the client in 2009. '.repeat(12).trim() },
+    { hostname: 'img.' + GL_ZONE, role: 'image', dns_on_cloudflare: false, renews_on: dayFrom(12) },
+    { hostname: 'old-client-domain.example', role: 'old' },
+  ],
+};
+
+async function seedDetails(base, siteId) {
+  const made = {};
+  for (const [kind, rows] of Object.entries(DETAILS)) {
+    made[kind] = [];
+    for (const row of rows) made[kind].push((await api(base, 'POST', `/api/sites/${siteId}/${kind}`, row)).item);
+  }
+  const at = (kind, i) => `/api/sites/${siteId}/${kind}/${made[kind][i].id}`;
+  await api(base, 'PATCH', at('services', 0), { notes: 'Before: ' + LONG_LINK });
+  await api(base, 'PATCH', at('services', 0), { notes: DETAILS.services[0].notes, account: 'marketing@example.com' });
+  await api(base, 'PATCH', at('contacts', 0), { email: 'x' + LONG_EMAIL.slice(1) });
+  await api(base, 'PATCH', at('domains', 0), { registrar: 'Cloudflare', dns_on_cloudflare: false, renews_on: dayFrom(-39) });
+  const gone = (await api(base, 'POST', `/api/sites/${siteId}/contacts`, { ...DETAILS.contacts[0], name: 'Z' + DETAILS.contacts[0].name.slice(1) })).item;
+  await api(base, 'DELETE', `/api/sites/${siteId}/contacts/${gone.id}`);
+}
+
+// The item of `kind` with the most in it, for the edit and remove states.
+const fullest = (items) => [...(items || [])].sort((a, b) => JSON.stringify(b).length - JSON.stringify(a).length)[0];
+
+// ---- the local Worker's own database ----
+const PG_URL = process.env.CHECK_PG_URL || 'postgres://desk@127.0.0.1:5433/postgres';
+// The address as it can be printed: no password.
+function shown(url) {
+  try { const u = new URL(url); if (u.password) u.password = '***'; return u.toString(); } catch { return '(not a URL)'; }
+}
+async function adminQuery(sql) {
+  const client = new pg.Client({ connectionString: PG_URL, connectionTimeoutMillis: 5000 });
+  client.on('error', () => {});
+  try {
+    await client.connect();
+  } catch (e) {
+    throw new Error(`Could not connect to Postgres at ${shown(PG_URL)}: ${e.message}\n`
+      + 'The layout check runs the Worker against a throwaway database, so it needs a Postgres server where it may '
+      + 'create and drop one. Start one, or point the check at one with\n'
+      + '  CHECK_PG_URL=postgres://user:password@host:port/postgres npm run check:overflow\n'
+      + '(the user must be allowed to CREATE DATABASE). Or measure a deployed desk with DESK_URL and DESK_KEY.');
+  }
+  try { await client.query(sql); } finally { await client.end().catch(() => {}); }
+}
+// → { url, drop() }: a new, empty database, named at random so two runs
+// never share one.
+async function makeDatabase() {
+  const name = 'desk_overflow_' + randomBytes(6).toString('hex');
+  await adminQuery(`CREATE DATABASE ${name}`);
+  const url = new URL(PG_URL);
+  url.pathname = '/' + name;
+  let dropped = false;
+  return {
+    url: url.toString(),
+    // FORCE: the Worker's connections may not have closed yet.
+    drop: async () => {
+      if (dropped) return;
+      dropped = true;
+      await adminQuery(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+    },
+  };
+}
+
 // ---- the local Worker ----
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -380,11 +479,11 @@ function freePort() {
   });
 }
 
-async function startWorker() {
+async function startWorker(databaseUrl) {
   const port = await freePort();
   const dir = mkdtempSync(join(tmpdir(), 'desk-overflow-'));
   const child = spawn('npx', ['wrangler', 'dev', '--port', String(port), '--ip', '127.0.0.1',
-    '--persist-to', dir, '--var', `DASH_KEY:${KEY}`, '--var', 'HTTPS_ONLY:off'],
+    '--persist-to', dir, '--var', `DASH_KEY:${KEY}`, '--var', 'HTTPS_ONLY:off', '--var', `DATABASE_URL:${databaseUrl}`],
   { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let log = '';
   child.stdout.on('data', (d) => { log += d; });
@@ -486,6 +585,9 @@ async function gotoDesk(page, base, withKey) {
   await page.waitForFunction(() => !/Loading/.test(document.getElementById('note').textContent) || !document.getElementById('gate').hidden);
 }
 const settle = (page) => page.waitForTimeout(450);   // the row's snap-scroll and the dock's slide
+// An opened row reads its services, contacts and domains; measure once they
+// are in (or have failed to come), not while they are on their way.
+const detailsIn = (card) => card.locator('.dts:not([data-state="loading"])').waitFor();
 
 // The Go live states, on one site's row: its dialog at every step a person
 // can reach, and its row section in each state a go-live can be in. Every
@@ -499,6 +601,7 @@ function goLiveStates(base, target) {
     await mockGoLive(p, target, mock);
     await gotoDesk(p, base, true);
     await card(p).locator('.nm').click();
+    await detailsIn(card(p));
     await settle(p);
     await card(p).locator(`[data-golive="${act}"]`).click();
   };
@@ -614,6 +717,7 @@ function goLiveStates(base, target) {
       await gotoDesk(p, base, true);
       await card(p).locator('.nm').click();
       await card(p).locator('.glrow [data-golive="rollback"]').waitFor();   // every one of these can roll back
+      await detailsIn(card(p));
       await settle(p);
     }]);
   }
@@ -627,7 +731,85 @@ function goLiveTarget(sites) {
   return [...sites].sort((a, b) => can(b) - can(a) || b.name.length - a.name.length)[0];
 }
 
-function statesFor(base, sites) {
+// A site's services, contacts, domains and history, on the row that has the
+// most of them: loading, failing to load, every section, the history
+// opened in full, each add and edit dialog, a Remove armed, and (locally,
+// since they write) a refused edit and an edit that meets a teammate's.
+function detailsStates(base, target, details) {
+  const S = [];
+  const card = (p) => p.locator(`.site[data-id="${target.id}"]`);
+  const box = (p) => card(p).locator('.dts');
+  const isDetails = (u) => /^\/api\/sites\/[^/]+\/details$/.test(u.pathname);
+  const open = async (p, state = 'ready') => {
+    await gotoDesk(p, base, true);
+    await card(p).locator('.nm').click();
+    await card(p).locator(`.dts[data-state="${state}"]`).waitFor();
+    await settle(p);
+  };
+  const dialog = async (p, act, kind, item) => {
+    await open(p);
+    await box(p).locator(`[data-dact="${act}"][data-kind="${kind}"]` + (item ? `[data-item="${item.id}"]` : '')).click();
+    await p.locator('#dt-editor[open]').waitFor();
+    await settle(p);
+  };
+
+  S.push(['details: loading', async (p) => {
+    await p.route(isDetails, () => {});   // never answers
+    await open(p, 'loading');
+  }]);
+  S.push(['details: load error', async (p) => {
+    await p.route(isDetails, (route) => route.fulfill({ status: 503, json: {
+      error: 'The desk could not reach its database. Try again in a moment.', code: 'database-unavailable',
+    } }));
+    await open(p, 'error');
+  }]);
+  S.push(['details: every section', (p) => open(p)]);
+  S.push(['details: history, all of it', async (p) => {
+    await open(p);
+    await box(p).locator('.dtfold').click();
+    const all = box(p).locator('[data-dact="all"]');
+    if (await all.count()) await all.click();
+    await settle(p);
+  }]);
+  for (const kind of ['services', 'contacts', 'domains']) {
+    S.push([`details: add ${kind}`, (p) => dialog(p, 'add', kind)]);
+    const item = fullest(details[kind]);
+    if (item) S.push([`details: edit ${kind}`, (p) => dialog(p, 'edit', kind, item)]);
+  }
+  const service = fullest(details.services);
+  const armed = fullest(details.domains) || service || fullest(details.contacts);
+  if (armed) {
+    S.push(['details: remove armed', async (p) => {
+      await open(p);
+      await box(p).locator(`[data-dact="remove"][data-item="${armed.id}"]`).click();   // first tap only arms it
+    }]);
+  }
+  if (!LIVE && service) {
+    const path = `/api/sites/${target.id}/services/${service.id}`;
+    const current = async () => (await api(base, 'GET', `/api/sites/${target.id}/details`)).services.find((x) => x.id === service.id);
+    S.push(['details: edit error', async (p) => {
+      await dialog(p, 'edit', 'services', service);
+      await p.fill('#dtform input[name=url]', 'not a link at all');
+      await p.click('#dt-save');
+      await p.waitForSelector('#dterr:not([hidden])');
+    }]);
+    S.push(['details: edit conflict', async (p) => {
+      await dialog(p, 'edit', 'services', service);
+      const was = await current();
+      await api(base, 'PATCH', path, { identifier: was.identifier.slice(0, 180) + '-teammate', notes: was.notes + ' (teammate)' });
+      await p.fill('#dtform input[name=identifier]', was.identifier.slice(0, 180) + '-mine');
+      await p.fill('#dtform textarea[name=notes]', 'mine');
+      await p.click('#dt-save');
+      await p.waitForSelector('#dterr:not([hidden])');
+      // put it back, so later widths start from the same data
+      const now = await current();
+      await api(base, 'PATCH', path, { identifier: was.identifier, notes: was.notes, expected_updated_at: now.updated_at });
+    }]);
+  }
+  return S;
+}
+
+function statesFor(base, sites, detailsTarget) {
   const siteNames = sites.map((s) => s.name);
   const S = [];
   S.push(['locked', async (p) => { await gotoDesk(p, base, false); await p.waitForSelector('#gate:not([hidden])'); }]);
@@ -639,7 +821,9 @@ function statesFor(base, sites) {
     for (const name of siteNames) {
       S.push([`open: ${name.slice(0, 28)}`, async (p) => {
         await gotoDesk(p, base, true);
-        await p.locator('.site', { hasText: name }).first().locator('.nm').click();
+        const card = p.locator('.site', { hasText: name }).first();
+        await card.locator('.nm').click();
+        await detailsIn(card);
         await settle(p);
       }]);
     }
@@ -666,6 +850,7 @@ function statesFor(base, sites) {
       await gotoDesk(p, base, true);
       const card = p.locator('.site', { hasText: target }).first();
       await card.locator('.nm').click();
+      await detailsIn(card);
       await card.locator('.btn.edit').click();
       await settle(p);
     }]);
@@ -673,11 +858,13 @@ function statesFor(base, sites) {
       await gotoDesk(p, base, true);
       const card = p.locator('.site', { hasText: target }).first();
       await card.locator('.nm').click();
+      await detailsIn(card);
       await settle(p);
       await card.locator('.btn.del').click();   // first tap only arms it; nothing is deleted
     }]);
   }
   if (sites.length) S.push(...goLiveStates(base, goLiveTarget(sites)));
+  if (detailsTarget) S.push(...detailsStates(base, detailsTarget.site, detailsTarget.details));
   if (!LIVE) {
     // These two send writes, so they run against the local Worker only.
     S.push(['edit error', async (p) => {
@@ -709,9 +896,32 @@ function statesFor(base, sites) {
   return S;
 }
 
+// The row the details states use: the one with the most services,
+// contacts and domains (locally, the one seedDetails filled). None if the
+// desk has no details to read.
+async function pickDetailsTarget(base, sites) {
+  let best = null;
+  for (const site of sites) {
+    let details;
+    try { details = await api(base, 'GET', `/api/sites/${site.id}/details`); } catch { continue; }
+    const n = ['services', 'contacts', 'domains'].reduce((sum, k) => sum + (details[k] || []).length, 0);
+    if (!best || n > best.n) best = { site, details, n };
+  }
+  return best;
+}
+
 // ---- run ----
 let worker = null;
+let db = null;
 let failed = false;
+// Stopped with Ctrl-C: the Worker and its database go too.
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, async () => {
+    if (worker) worker.stop();
+    if (db) await db.drop().catch(() => {});
+    process.exit(130);
+  });
+}
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || undefined,
   args: (process.env.CHROMIUM_ARGS || '').split(/\s+/).filter(Boolean),
@@ -719,14 +929,19 @@ const browser = await chromium.launch({
 try {
   let base = LIVE;
   if (!LIVE) {
-    worker = await startWorker();
+    db = await makeDatabase();
+    worker = await startWorker(db.url);
     base = worker.base;
-    for (const s of STRESS) await api(base, 'POST', '/api/sites', s);
+    for (const s of STRESS) {
+      const { site } = await api(base, 'POST', '/api/sites', s);
+      if (s.name === LONGEST) await seedDetails(base, site.id);
+    }
   }
   const { sites } = await api(base, 'GET', '/api/sites');
+  const detailsTarget = await pickDetailsTarget(base, sites);
   console.log(`Measuring ${LIVE || 'the local Worker with stress data'}: ${sites.length} site(s), ${WIDTHS.length} widths.\n`);
 
-  const states = statesFor(base, sites);
+  const states = statesFor(base, sites, detailsTarget);
   const clippedSeen = new Map();
   let fontsMissing = false;
   for (const width of WIDTHS) {
@@ -775,5 +990,11 @@ try {
 } finally {
   await browser.close();
   if (worker) worker.stop();
+  if (db) {
+    await db.drop().catch((e) => {
+      failed = true;
+      console.error(`Could not drop the throwaway database: ${e.message}`);
+    });
+  }
 }
 process.exit(failed ? 1 : 0);

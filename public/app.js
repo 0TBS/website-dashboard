@@ -85,7 +85,9 @@ async function api(method, path, body) {
     const e = new Error(data.error || 'The desk answered ' + res.status + '.');
     e.field = data.field;
     e.code = data.code;
+    e.status = res.status;
     e.site = data.site;   // on a 409, the row as it now stands
+    e.item = data.item;   // on a 409 for a service, contact or domain, the same
     throw e;
   }
   return data;
@@ -254,6 +256,7 @@ function cardHtml(s, open) {
     </div>
     ${glRowHtml(s)}
     ${s.notes ? `<div><p class="sect">Notes</p><p class="notes">${esc(s.notes)}</p></div>` : ''}
+    ${window.deskDetails ? window.deskDetails.html(s, open) : ''}
     <div class="bfoot">
       <span class="stamp">${esc(stamp)} <span class="saved" role="status"></span></span>
       <span class="btns">
@@ -423,7 +426,11 @@ function setOpen(card, on) {
 function toggle(card) {
   const opening = !card.hasAttribute('data-open');
   grid.querySelectorAll('.site[data-open]').forEach((c) => setOpen(c, false));
-  if (opening) { setOpen(card, true); snapTo(card); }
+  if (opening) {
+    setOpen(card, true);
+    snapTo(card);
+    if (window.deskDetails) window.deskDetails.opened(card.dataset.id);
+  }
   paintDock();
 }
 
@@ -1542,6 +1549,7 @@ const GATE_MSG = {
 function lock(why) {
   loaded = false;
   sites = [];
+  if (window.deskDetails) window.deskDetails.forget();
   grid.innerHTML = '';
   $('tools').hidden = true;
   $('logoff').hidden = true;
@@ -1583,6 +1591,14 @@ async function adoptSavedKey() {
     if (ex instanceof Locked) writeStore(KEY_STORE, '');   // a wrong key is no use; a network error might be
   }
 }
+
+// ---- what details.js uses ----
+// A site's services, contacts, domains and history are drawn by details.js
+// (window.deskDetails: html() inside each row, opened() when a row opens,
+// forget() on Log off). It reaches the desk through these, and nothing else.
+window.desk = Object.freeze({
+  api, Locked, lock, esc, copyBtn, openBtn, whenAt, fieldLabel, byId, PLATFORMS, FLAGS,
+});
 
 // ---- loading ----
 async function load({ quiet = false } = {}) {
