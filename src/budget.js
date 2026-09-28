@@ -3,8 +3,9 @@
 // switch that dies half-way is worse than one that never starts, so every
 // fetch a request makes (the Access keys, the Cloudflare API, the sites,
 // public DNS) goes through one counted fetch, and the go-live code checks
-// what is left before each step. Durable Object calls are not counted: they
-// come out of a separate allowance of 1,000.
+// what is left before each step. The database is not counted here: a request
+// holds one connection to it (db.js, pgSession), two if the first drops, and
+// that comes out of the few calls LIMIT leaves spare.
 //
 // Kept apart from worker.js so it can be tested under plain Node.
 

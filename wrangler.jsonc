@@ -3,6 +3,9 @@
   "name": "website-dashboard",
   "main": "src/worker.js",
   "compatibility_date": "2026-09-24",
+  // pg, the Postgres driver, needs Node's APIs; it reaches Neon over a TCP
+  // socket. The address is the DATABASE_URL secret.
+  "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -11,8 +14,8 @@
     "not_found_handling": "404-page",
     "html_handling": "auto-trailing-slash"
   },
-  // The list: one SQLite-backed Durable Object (see src/worker.js for why it
-  // is not D1). Free on the Workers Free plan.
+  // The old home of the list, kept only until its rows are copied into
+  // Postgres (src/worker.js, ready()). Its data is left untouched.
   "durable_objects": {
     "bindings": [{ "name": "DESK", "class_name": "Desk" }]
   },
