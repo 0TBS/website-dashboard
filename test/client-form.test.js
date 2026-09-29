@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanClientForm, cleanCheck, hostOf, MAIN_CONTACT } from '../src/client-form.js';
+import { cleanClientForm, MAIN_CONTACT } from '../src/client-form.js';
 import { InvalidField } from '../src/sites.js';
 import { Store } from '../src/store.js';
 import { freshDatabase } from './pglite.js';
@@ -85,15 +85,6 @@ test('login info that looks like a password is refused; where the login lives is
   }
 });
 
-test('the check compares a bare host and a lower-case email, and ignores what is not valid yet', () => {
-  assert.equal(hostOf('www.acme.com/shop'), 'acme.com');
-  assert.equal(hostOf('acme.com:8443'), 'acme.com');
-  assert.equal(hostOf(null), null);
-  const q = cleanCheck(new URLSearchParams({ business: ' Acme ', live_url: 'https://WWW.Acme.com/x', email: 'Ana@Acme.com' }));
-  assert.deepEqual(q, { name: 'Acme', host: 'acme.com', email: 'ana@acme.com' });
-  assert.deepEqual(cleanCheck(new URLSearchParams({ live_url: 'not a url', email: 'nope' })), { name: null, host: null, email: null });
-});
-
 async function desk() {
   const { db, connect } = await freshDatabase();
   return { db, store: new Store(connect) };
@@ -123,33 +114,18 @@ test('a sent form makes the site and everything under it, in one go', async () =
   assert.equal((await store.details(other.id)).client_form, null);
 });
 
-test('a client already on the desk cannot get a second form', async () => {
+test('a client already on the desk can send another form, which makes a site of its own', async () => {
   const { db, store } = await desk();
   const first = (await store.createClient(cleanClientForm(FORM))).site;
-  const count = async () => (await db.query('SELECT count(*)::int AS n FROM sites')).rows[0].n;
-  const again = (changes) => store.createClient(cleanClientForm({ ...FORM, ...changes }));
-  const fresh = { business: 'Someone Else', live_url: 'someone-else.com', contact: { name: 'Zed', email: 'zed@else.com' } };
-
-  // The same live site, with or without www. and whatever its path.
-  let res = await again({ ...fresh, live_url: 'http://acmeglass.com/about' });
-  assert.deepEqual(res.exists, { field: 'live_url', site: { id: first.id, name: 'Acme Glass' } });
-  // The same name, whatever the case.
-  res = await again({ ...fresh, business: 'ACME GLASS' });
-  assert.equal(res.exists.field, 'business');
-  // The same contact email, whatever the case.
-  res = await again({ ...fresh, contact: { name: 'Ana', email: 'ANA@acmeglass.com' } });
-  assert.equal(res.exists.field, 'contact.email');
-  assert.equal(await count(), 1);
-
-  // A domain listed on a site's details counts too.
-  await store.createItem('domains', first.id, { hostname: 'acme-old.ca', role: 'old' });
-  assert.equal((await again({ ...fresh, live_url: 'www.acme-old.ca' })).exists.field, 'live_url');
-  // Someone new is let through.
-  assert.equal((await again(fresh)).site.id, '0002');
-  // And the check the page makes as it is filled in says the same.
-  assert.deepEqual(await store.findClient({ name: null, host: 'acmeglass.com', email: null }),
-    { field: 'live_url', site: { id: first.id, name: 'Acme Glass' } });
-  assert.equal(await store.findClient({ name: 'Nobody', host: 'nobody.com', email: 'no@body.com' }), null);
+  const second = (await store.createClient(cleanClientForm(FORM))).site;
+  assert.notEqual(second.id, first.id);
+  assert.equal(second.name, first.name);
+  const count = async (t) => (await db.query(`SELECT count(*)::int AS n FROM ${t}`)).rows[0].n;
+  assert.equal(await count('sites'), 2);
+  assert.equal(await count('client_forms'), 2);
+  // Each site has its own contacts, services and jobs.
+  assert.equal((await store.details(second.id)).contacts.length, 2);
+  assert.equal((await store.details(first.id)).jobs.length, 2);
 });
 
 test('a form that fails part-way leaves nothing behind', async () => {

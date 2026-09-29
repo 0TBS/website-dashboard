@@ -1,9 +1,7 @@
 // The client form. Everything is sent in one POST to /api/client-form, which
 // makes the site and all it holds in one go, or nothing (src/client-form.js
-// says what each box may hold). As the business name, the live website and
-// the contact's email are filled in, the page asks /api/client-form/check
-// whether that client is on the desk already, and says so before anything
-// is typed further: a client already there cannot get a second form.
+// says what each box may hold). Every form makes a new site, even for a
+// client already on the desk: a client can come back for something new.
 //
 // The desk's login cookie is the key here too; with none, the page asks for
 // the desk key the way the desk does.
@@ -13,7 +11,6 @@
   const form = $('cf');
   const note = $('cf-note');
   const errEl = $('cf-err');
-  const warn = $('cf-exists');
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -127,39 +124,9 @@
     return out;
   }
 
-  // ---- is this client on the desk already? ----
-  let checkSeq = 0;
-  let exists = null;
-  async function check() {
-    const my = ++checkSeq;
-    const q = new URLSearchParams({ business: val('business'), live_url: val('live_url'), email: val('contact.email') });
-    let res;
-    try { res = await api('GET', '/api/client-form/check?' + q); } catch (ex) {
-      if (ex instanceof Locked) lock(ex);
-      return;   // the Worker checks again when the form is sent
-    }
-    if (my === checkSeq) showExists(res.exists);
-  }
-  function showExists(e) {
-    exists = e;
-    form.querySelectorAll('[data-f="business"],[data-f="live_url"],[data-f="contact.email"]')
-      .forEach((el) => { if (el.dataset.dup) { el.removeAttribute('aria-invalid'); delete el.dataset.dup; } });
-    $('cf-save').disabled = !!e;
-    if (!e) { warn.hidden = true; warn.innerHTML = ''; return; }
-    const box = form.querySelector(`[data-f="${e.field}"]`);
-    if (box) { box.setAttribute('aria-invalid', 'true'); box.dataset.dup = '1'; }
-    warn.innerHTML = `<p>${esc(e.error)}</p>
-      <a class="btn open" href="/#site=${encodeURIComponent(e.site.id)}">Open ${esc(e.site.name)} on the desk</a>`;
-    warn.hidden = false;
-  }
-  let checkTimer;
+  // A box marked wrong is unmarked as soon as it is typed in again.
   form.addEventListener('input', (ev) => {
-    const f = ev.target.dataset.f;
-    if (f === 'business' || f === 'live_url' || f === 'contact.email') {
-      clearTimeout(checkTimer);
-      checkTimer = setTimeout(check, 400);
-    }
-    if (ev.target.getAttribute('aria-invalid') && !ev.target.dataset.dup) ev.target.removeAttribute('aria-invalid');
+    if (ev.target.getAttribute('aria-invalid')) ev.target.removeAttribute('aria-invalid');
   });
   // The live website is usually the first URL with work to do.
   form.addEventListener('change', (ev) => {
@@ -179,8 +146,7 @@
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     errEl.hidden = true;
-    form.querySelectorAll('[aria-invalid]:not([data-dup])').forEach((el) => el.removeAttribute('aria-invalid'));
-    if (exists) { showExists(exists); warn.scrollIntoView({ block: 'center' }); return; }
+    form.querySelectorAll('[aria-invalid]').forEach((el) => el.removeAttribute('aria-invalid'));
     const save = $('cf-save');
     save.disabled = true;
     try {
@@ -188,14 +154,9 @@
       done(site);
     } catch (ex) {
       if (ex instanceof Locked) { lock(ex); return; }
-      if (ex.code === 'client-exists') {
-        showExists({ error: ex.message, field: ex.field, site: ex.site });
-        warn.scrollIntoView({ block: 'center' });
-        return;
-      }
       showErr(ex.message, ex.field);
     } finally {
-      save.disabled = !!exists;
+      save.disabled = false;
     }
   });
 
@@ -217,7 +178,6 @@
   function fresh() {
     form.reset();
     for (const kind of Object.keys(ROWS)) { ROWS[kind].list.innerHTML = ''; addRow(kind); }
-    showExists(null);
     errEl.hidden = true;
     form.querySelectorAll('[aria-invalid]').forEach((el) => el.removeAttribute('aria-invalid'));
     form.hidden = false;
