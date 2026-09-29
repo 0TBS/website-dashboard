@@ -10,7 +10,7 @@
 import { transaction } from './db.js';
 import { toJson, COLUMNS } from './sites.js';
 import { ITEMS, itemJson } from './details.js';
-import { OPTIONS, hostOf } from './client-form.js';
+import { OPTIONS } from './client-form.js';
 import * as golive from './golive-store.js';
 
 const HISTORY_LIMIT = 200;
@@ -187,16 +187,12 @@ export class Store {
     });
   }
 
-  // The client form (client-form.js has cleaned it). The client must not be
-  // on the desk already: the check and the writes run under the desk's lock,
-  // so two forms for the same client sent at once cannot both land.
-  // → { site } · { exists: { field, site: { id, name } } }.
+  // The client form (client-form.js has cleaned it): a new site and
+  // everything under it, in one transaction. Every form makes a site of its
+  // own, even for a client already on the desk: a client can come back for
+  // something new. → { site }.
   createClient(form) {
     return this.#write(async (tx) => {
-      const exists = await findClient(tx, {
-        name: form.site.name, host: hostOf(form.site.live_domain), email: form.contacts[0]?.email?.toLowerCase() ?? null,
-      });
-      if (exists) return { exists };
       const now = new Date().toISOString();
       const id = await nextId(tx, 'sites');
       const values = COLUMNS.map((c) => (c in form.site ? form.site[c] : null));
@@ -216,12 +212,6 @@ export class Store {
       );
       return { site: await golive.siteWithGolive(tx, id) };
     });
-  }
-
-  // Whether a client is on the desk already, for the form to say so before
-  // it is sent. → { field, site: { id, name } } or null.
-  findClient(query) {
-    return this.#read((tx) => findClient(tx, query));
   }
 
   // The copy from the Durable Object, once. → the counts copied, or null when
@@ -295,35 +285,6 @@ async function insertItem(tx, kind, siteId, fields) {
     id, siteId, ...columns.map((c) => fields[c] ?? null), now, now
   );
   return readItem(tx, kind, siteId, id);
-}
-
-// A client already on the desk: a site whose live domain, or any domain
-// listed for it, is the same host (with or without www.); a site with the
-// same name, whatever the case; or a contact with the same email. The first
-// that matches, in that order. `query` is { name, host, email }, each null
-// when not given.
-const BARE = (col) => `regexp_replace(split_part(split_part(${col}, '/', 1), ':', 1), '^www\\.', '')`;
-async function findClient(tx, { name, host, email }) {
-  const hit = (field, row) => (row ? { field, site: { id: row.id, name: row.name } } : null);
-  if (host) {
-    const row = await tx.row(
-      `SELECT id, name FROM sites WHERE ${BARE('live_domain')} = ?
-       UNION ALL
-       SELECT s.id, s.name FROM site_domains d JOIN sites s ON s.id = d.site_id WHERE ${BARE('d.hostname')} = ?
-       LIMIT 1`, host, host);
-    if (row) return hit('live_url', row);
-  }
-  if (name) {
-    const row = await tx.row('SELECT id, name FROM sites WHERE lower(name) = lower(?) ORDER BY id LIMIT 1', name);
-    if (row) return hit('business', row);
-  }
-  if (email) {
-    const row = await tx.row(
-      `SELECT s.id, s.name FROM site_contacts c JOIN sites s ON s.id = c.site_id
-       WHERE lower(c.email) = ? ORDER BY s.id LIMIT 1`, email);
-    if (row) return hit('contact.email', row);
-  }
-  return null;
 }
 
 // The form's ticks as true/false, with when it was sent; null for a site

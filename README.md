@@ -62,7 +62,7 @@ A site's row can also **Go live**: point its live domain at its staging Worker. 
 | Job info: a URL, with Clone, Database / Backblaze B2, SEO / PPC and Live ticks | The site's job list. **+ Add URL** adds a row. The first row takes the live website URL unless something else is typed there. Any URL ticked for SEO / PPC sets the site's SEO / PPC to *Needed*. |
 | Notify rep (me), Notify client, Competitor analysis | Saved with the site, under Client form. The desk does not send any email yet. |
 
-**A client already on the desk cannot get a second form.** As the business name, live website URL and contact email are typed, the form checks the desk, and if the client is there it says which site and turns Save off. A client counts as already there when a site has the same live website (with or without `www.`, whatever the path), or lists that domain under its Domains, or has the same name (whatever the case), or has a contact with the same email. The Worker checks again when the form is sent, under the desk's lock, so two forms for one client sent at once cannot both land.
+A client already on the desk can send another form, for something new: every form makes a site of its own.
 
 Everything from one form is saved in one transaction: all of it, or, if anything is refused, none of it. The form then links to the new site on the desk (`/#site=<id>`, which opens that row).
 
@@ -311,8 +311,7 @@ Scripts send `Authorization: Bearer <DASH_KEY>` with every request. The page use
 | DELETE | `/api/sites/:id/:kind/:itemId` | – | `{ deleted: itemId }` |
 
 | GET | `/api/client-form` | – | `{ choices }`: the service kinds, job ticks, options and row limits the form offers |
-| GET | `/api/client-form/check?business=&live_url=&email=` | – | `{ exists: null }`, or `{ exists: { error, code: "client-exists", field, site: { id, name } } }` |
-| POST | `/api/client-form` | the form (below) | `201 { site }`; `409 { code: "client-exists", field, site }`; `400 { error, field }`, the field named as a path such as `delegates.1.email` or `jobs.0.url` |
+| POST | `/api/client-form` | the form (below) | `201 { site }`; `400 { error, field }`, the field named as a path such as `delegates.1.email` or `jobs.0.url` |
 
 `:kind` is `services`, `contacts`, `domains`, `jobs`, or one of the social media platforms: `tiktok`, `linkedin`, `facebook`, `x`, `instagram`.
 | GET | `/api/golive/signin?site=<id>` | – | Where Access sends you back after its login; needs no desk key. `302` to `/#golive=<id>` (`/` if the id is not a site id), or to `/#golive-error=<code>` |

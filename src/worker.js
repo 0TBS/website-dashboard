@@ -14,7 +14,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { cleanSite, InvalidField } from './sites.js';
 import { cleanItem, KINDS, ITEMS, CHOICES, SERVICE_KINDS, JOB_TASKS } from './details.js';
-import { cleanClientForm, cleanCheck, OPTIONS, LIMITS } from './client-form.js';
+import { cleanClientForm, OPTIONS, LIMITS } from './client-form.js';
 import { sessionToken, cookieValues, sessionCookie, clearCookie } from './session.js';
 import { json } from './answers.js';
 import { pgSession } from './db.js';
@@ -175,7 +175,7 @@ async function handleApi(request, env, url, ctx) {
     const res = parts[2] === 'golive'
       ? await handleGoLive(request, env, { parts, url, store, waitUntil })
       : parts[2] === 'client-form'
-        ? await handleClientForm(request, store, parts, url)
+        ? await handleClientForm(request, store, parts)
         : await handleSites(request, store, parts);
     // Each visit restarts the cookie's 400 days, so an active browser never expires.
     if (cred === 'cookie') res.headers.append('set-cookie', sessionCookie(await sessionToken(env.DASH_KEY), secure));
@@ -261,37 +261,22 @@ const DUPLICATE = {
 
 // The client form (src/client-form.js):
 //   GET  /api/client-form        what the form offers: service kinds, job ticks, options
-//   GET  /api/client-form/check  ?business=&live_url=&email=: is this client on the desk?
 //   POST /api/client-form        the whole form: a new site and everything under it
 const FORM_CHOICES = { service_kinds: SERVICE_KINDS, job_tasks: JOB_TASKS, options: OPTIONS, limits: LIMITS };
-const EXISTS_BY = {
-  live_url: 'a site with this live website',
-  business: 'a site with this business name',
-  'contact.email': 'a contact with this email',
-};
-const existsJson = (exists) => ({
-  error: `This client is already on the desk: ${exists.site.name} (${exists.site.id}) has ${EXISTS_BY[exists.field]}. Add to that site instead of making a new one.`,
-  code: 'client-exists', field: exists.field, site: exists.site,
-});
 
-async function handleClientForm(request, db, parts, url) {
+async function handleClientForm(request, db, parts) {
   const m = request.method;
   if (parts.length === 3 && m === 'GET') return json({ choices: FORM_CHOICES });
-  if (parts.length === 4 && parts[3] === 'check' && m === 'GET') {
-    const exists = await db.findClient(cleanCheck(url.searchParams));
-    return json(exists ? { exists: existsJson(exists) } : { exists: null });
-  }
   if (parts.length === 3 && m === 'POST') {
     try {
       const res = await db.createClient(cleanClientForm(await readBody(request)));
-      if (res.exists) return json(existsJson(res.exists), 409);
       return json({ site: res.site }, 201);
     } catch (e) {
       if (e instanceof InvalidField) return json({ error: e.message, field: e.field }, 400);
       throw e;
     }
   }
-  if (parts.length > 4 || (parts[3] && parts[3] !== 'check')) return json({ error: 'Not found.' }, 404);
+  if (parts.length > 3) return json({ error: 'Not found.' }, 404);
   return json({ error: 'Method not allowed.' }, 405);
 }
 

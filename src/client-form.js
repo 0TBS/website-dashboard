@@ -12,7 +12,7 @@
 // login lives, and a line that looks like a password is refused.
 
 import { InvalidField, normalizeAddress, normalizeText } from './sites.js';
-import { cleanItem, JOB_TASKS, normalizeEmail } from './details.js';
+import { cleanItem, JOB_TASKS } from './details.js';
 
 // The ticks beside the job list. Recorded with the site (client_forms); the
 // desk does not send any email yet.
@@ -112,22 +112,4 @@ export function cleanClientForm(input) {
   if (jobs.some((j) => j.seo_ppc === 1)) site.needs_seo_ppc = 1;
 
   return { site, contacts: [contact, ...delegates], services, jobs, options };
-}
-
-// What the duplicate check compares: the live site's host without its
-// www., and the contact's email in lower case.
-export function hostOf(address) {
-  return address ? address.split('/')[0].replace(/:\d+$/, '').replace(/^www\./, '') : null;
-}
-
-// The query for GET /api/client-form/check, cleaned the same way. A value
-// that is not valid yet is not checked: the form says what is wrong with it
-// when it is sent.
-export function cleanCheck(params) {
-  const tryIt = (fn) => { try { return fn(); } catch { return null; } };
-  return {
-    name: tryIt(() => normalizeText(params.get('business'), 120)),
-    host: hostOf(tryIt(() => normalizeAddress(params.get('live_url')))),
-    email: tryIt(() => normalizeEmail(params.get('email')))?.toLowerCase() ?? null,
-  };
 }

@@ -629,11 +629,9 @@ async function fillForm(page) {
   const c = FORM_CLIENT;
   const put = (f, v) => page.fill(`[data-f="${f}"]`, v);
   await put('contact.name', c.contact.name);
-  // Not the seeded client's own address and email, so the form is not
-  // taken for that client (the "already on the desk" state sets that up).
-  await put('contact.email', 'new-' + c.contact.email);
+  await put('contact.email', c.contact.email);
   await put('contact.phone', c.contact.phone);
-  await put('live_url', c.live_url.replace('www.', 'www.new-'));
+  await put('live_url', c.live_url);
   for (const kind of ['delegates', 'services', 'jobs']) await page.click(`[data-add="${kind}"]`);
   const a = c.delegates[0];
   for (const i of [0, 1]) {
@@ -897,12 +895,6 @@ function statesFor(base, sites, detailsTarget) {
     await fillForm(p);
     await p.fill('[data-f="business"]', 'A business not on the desk yet, with a name as long as the form allows it to be, 120 chars.');
     await settle(p);
-  }]);
-  S.push(['client form: already on the desk', async (p) => {
-    await gotoForm(p, base, true);
-    await fillForm(p);
-    await p.fill('[data-f="business"]', LONGEST);
-    await p.waitForSelector('#cf-exists:not([hidden])');
   }]);
   // Refused by the Worker, so it writes nothing, on a deployed desk too.
   S.push(['client form: an error', async (p) => {
