@@ -15,6 +15,65 @@ const history = async (db) => (await db.query(
   'SELECT who, item, action, field, old_value, new_value FROM history ORDER BY id'
 )).rows;
 
+test('ids are 0001, 0002 and on, each table counting on its own, and never reused', async () => {
+  const { db, store } = await desk();
+  const a = await store.create({ name: 'Acme' });
+  const b = await store.create({ name: 'Beta' });
+  assert.deepEqual([a.id, b.id], ['0001', '0002']);
+  const s1 = (await store.createItem('services', a.id, { kind: 'ga4' })).item;
+  const s2 = (await store.createItem('services', b.id, { kind: 'gtm' })).item;
+  const c1 = (await store.createItem('contacts', a.id, { name: 'Ana' })).item;
+  const x1 = (await store.createItem('x', a.id, { url: 'https://x.com/acme' })).item;
+  assert.deepEqual([s1.id, s2.id, c1.id, x1.id], ['0001', '0002', '0001', '0001']);
+  // A number that was used, even by a row now gone, is not handed out again.
+  await store.remove(b.id);
+  assert.equal((await store.create({ name: 'Gamma' })).id, '0003');
+  // Past 9999 the id simply grows.
+  await db.query("SELECT setval('sites_number', 9999)");
+  assert.equal((await store.create({ name: 'Ten thousand' })).id, '10000');
+});
+
+test('step 4 renumbers what is already there, and everything that names it follows', async () => {
+  const { PGlite } = await import('@electric-sql/pglite');
+  const { pgliteConnector } = await import('./pglite.js');
+  const db = new PGlite();
+  const connect = pgliteConnector(db);
+  await migrate(connect, { upTo: 3 });
+  const A = 'a0000000-0000-4000-8000-000000000001';
+  const B = 'b0000000-0000-4000-8000-000000000002';
+  const SVC = 'c0000000-0000-4000-8000-000000000003';
+  // Beta was made first, so it becomes 0001.
+  await db.exec(`
+    INSERT INTO sites (id, name, created_at, updated_at) VALUES ('${A}', 'Acme', '2026-09-25T15:00:00.000Z', 'u'),
+                                                                ('${B}', 'Beta', '2026-09-25T14:00:00.000Z', 'u');
+    INSERT INTO site_services (id, site_id, kind, created_at, updated_at) VALUES ('${SVC}', '${A}', 'ga4', 'c', 'u');
+    INSERT INTO site_x (id, site_id, url, created_at, updated_at) VALUES ('d0000000-0000-4000-8000-000000000004', '${A}', 'https://x.com/acme', 'c', 'u');
+    INSERT INTO golive_log (site_id, at, action, text) VALUES ('${A}', 'a', 'switch-started', 'Started.');
+  `);
+  const before = (await db.query('SELECT count(*)::int AS n FROM history')).rows[0].n;
+  await migrate(connect);
+  const rows = async (q) => (await db.query(q)).rows;
+  assert.deepEqual(await rows('SELECT id, name FROM sites ORDER BY id'), [{ id: '0001', name: 'Beta' }, { id: '0002', name: 'Acme' }]);
+  assert.deepEqual(await rows('SELECT id, site_id FROM site_services'), [{ id: '0001', site_id: '0002' }]);
+  assert.deepEqual(await rows('SELECT id, site_id FROM site_x'), [{ id: '0001', site_id: '0002' }]);
+  assert.deepEqual(await rows('SELECT site_id FROM golive_log'), [{ site_id: '0002' }]);
+  // The history's rows name the new ids, and the renumber added none of its own.
+  const hist = await rows("SELECT item, item_id, site_id FROM history WHERE action = 'added' ORDER BY id");
+  assert.deepEqual(hist, [
+    { item: 'site', item_id: '0002', site_id: '0002' }, { item: 'site', item_id: '0001', site_id: '0001' },
+    { item: 'service', item_id: '0001', site_id: '0002' }, { item: 'x', item_id: '0001', site_id: '0002' },
+  ]);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM history')).rows[0].n, before);
+  // New rows carry on from there.
+  const store = new Store(connect);
+  assert.equal((await store.create({ name: 'Gamma' })).id, '0003');
+  assert.equal((await store.createItem('services', '0002', { kind: 'gtm' })).item.id, '0002');
+  // A site's details still go with it.
+  await store.remove('0002');
+  assert.deepEqual(await rows('SELECT count(*)::int AS n FROM site_services'), [{ n: 0 }]);
+  await db.close();
+});
+
 test('the list is in name order, whatever the case', async () => {
   const { store } = await desk();
   for (const name of ['beta', 'Acme', 'Zeta', 'alpha']) await store.create({ name });
@@ -24,14 +83,14 @@ test('the list is in name order, whatever the case', async () => {
 test('a site comes back as the page gets it: flags as true/false/null, no go-live yet', async () => {
   const { store } = await desk();
   const site = await store.create({ name: 'Acme', astro_staging: 1, domain_ours: 0 });
-  assert.match(site.id, /^[0-9a-f-]{36}$/);
+  assert.equal(site.id, '0001');
   assert.equal(site.astro_staging, true);
   assert.equal(site.domain_ours, false);
   assert.equal(site.needs_seo_ppc, null);
   assert.equal(site.golive, null);
   assert.equal(site.created_at, site.updated_at);
   assert.deepEqual(await store.read(site.id), site);
-  assert.equal(await store.read('00000000-0000-0000-0000-000000000000'), null);
+  assert.equal(await store.read('9999'), null);
 });
 
 test('an edit from a stale copy is refused and changes nothing', async () => {
@@ -43,7 +102,7 @@ test('an edit from a stale copy is refused and changes nothing', async () => {
   const second = await store.update(site.id, { notes: 'theirs' }, site.updated_at);
   assert.equal(second.conflict, true);
   assert.equal(second.site.notes, 'mine');
-  assert.deepEqual(await store.update('00000000-0000-0000-0000-000000000000', { notes: 'x' }, null), { missing: true });
+  assert.deepEqual(await store.update('9999', { notes: 'x' }, null), { missing: true });
 });
 
 test('every change to a site is in its history, field by field', async () => {
@@ -102,7 +161,7 @@ test('services, contacts and domains are added, edited and removed per site', as
   const other = await store.details(b.id);
   assert.deepEqual([other.services, other.contacts, other.domains], [[], [], []]);
   assert.deepEqual(other.history.map((h) => [h.item, h.action]), [['site', 'added']]);
-  assert.equal(await store.details('00000000-0000-0000-0000-000000000000'), null);
+  assert.equal(await store.details('9999'), null);
 
   // Another site's id does not reach this one's rows.
   assert.deepEqual(await store.updateItem('services', b.id, svc.id, { notes: 'x' }, null), { missing: true });
@@ -117,7 +176,7 @@ test('services, contacts and domains are added, edited and removed per site', as
   assert.equal(await store.removeItem('services', a.id, svc.id), true);
   assert.equal(await store.removeItem('services', a.id, svc.id), false);
   assert.deepEqual((await store.details(a.id)).services, []);
-  assert.deepEqual(await store.createItem('contacts', '00000000-0000-0000-0000-000000000000', { name: 'x' }), { missing: true });
+  assert.deepEqual(await store.createItem('contacts', '9999', { name: 'x' }), { missing: true });
 });
 
 test('a domain is listed once per site', async () => {
@@ -210,34 +269,42 @@ test('the Durable Object is copied across once, exactly, and makes no history', 
   assert.equal(await store.hasImported(), true);
   assert.equal(await store.importRows(DUMP), null, 'a second copy does nothing');
 
+  // Each site is numbered in the order it was made, and its go-live record
+  // follows it; everything else is exactly as the object held it.
+  const renumbered = { s1: '0001', s2: '0002' };
   for (const table of ['sites', 'golive', 'golive_log', 'golive_checks']) {
     const key = table === 'sites' ? 'id' : table === 'golive_log' ? 'seq' : 'site_id';
     const rows = (await db.query(`SELECT * FROM ${table} ORDER BY ${key}`)).rows;
     assert.equal(rows.length, DUMP[table].length, table);
     DUMP[table].forEach((want, i) => {
-      for (const [k, v] of Object.entries(want)) assert.deepEqual(rows[i][k], v, `${table}.${k}`);
+      for (const [k, v] of Object.entries(want)) {
+        const expected = (k === 'id' || k === 'site_id') ? renumbered[v] : v;
+        assert.deepEqual(rows[i][k], expected, `${table}.${k}`);
+      }
     });
   }
-  const acme = await store.read('s1');
+  const acme = await store.read('0001');
   assert.equal(acme.golive.state, 'live');
   assert.equal(acme.chat_url, null, 'a column the old row never had is not set');
   assert.deepEqual(await history(db), []);
 
   // The next log entry comes after the last one copied.
-  await store.goliveBegin('s1', { kind: 'rollback', token: 't2' });
-  assert.deepEqual((await store.goliveDetail('s1')).log.map((e) => e.seq), [1, 7, 8]);
+  await store.goliveBegin('0001', { kind: 'rollback', token: 't2' });
+  assert.deepEqual((await store.goliveDetail('0001')).log.map((e) => e.seq), [1, 7, 8]);
   // And the copy switched history off for itself only.
   assert.equal((await history(db)).length, 0, 'a rollback start changes no site field');
-  await store.update('s2', { notes: 'after' }, null);
+  await store.update('0002', { notes: 'after' }, null);
   assert.equal((await history(db)).length, 1);
+  assert.equal((await store.create({ name: 'Next' })).id, '0003', 'a new site comes after the copied ones');
 });
 
 test('a copy that cannot land every row lands none of them', async () => {
   const { db, store } = await desk();
-  await db.query("INSERT INTO sites (id, name, created_at, updated_at) VALUES ('s2', 'Already here', 'c', 'u')");
-  await assert.rejects(store.importRows(DUMP), /Copied 1 of the Durable Object's 2 sites rows; copied nothing/);
+  // Two checks for the same site: the second cannot land.
+  const twice = { ...DUMP, golive_checks: [DUMP.golive_checks[0], { ...DUMP.golive_checks[0], plan_hash: 'q' }] };
+  await assert.rejects(store.importRows(twice), /Copied 1 of the Durable Object's 2 golive_checks rows; copied nothing/);
   assert.equal(await store.hasImported(), false);
-  assert.deepEqual((await db.query('SELECT id FROM sites ORDER BY id')).rows, [{ id: 's2' }]);
+  assert.deepEqual((await db.query('SELECT count(*)::int AS n FROM sites')).rows, [{ n: 0 }]);
 });
 
 test('an empty Durable Object is copied as nothing, and remembered', async () => {

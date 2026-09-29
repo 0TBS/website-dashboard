@@ -29,8 +29,8 @@ const iso = () => new Date(clock.t).toISOString();
 const ACCOUNT = 'acc00000000000000000000000000001';
 const ZONE = 'e0000000000000000000000000000001';      // acme.com, the client
 const DESK_ZONE = 'e0000000000000000000000000000002'; // 10xid.com, the desk's own
-const SITE_ID = '3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b';
-const OTHER_ID = '7c9d0e1f-2a3b-4c5d-8e6f-0a1b2c3d4e5f';
+const SITE_ID = '0007';
+const OTHER_ID = '0012';
 const REF = 'desk-' + SITE_ID;
 const STAGING = 'staging-acme.10xid.com';
 const W = 'staging-acme';
@@ -323,7 +323,8 @@ test('unknown sites, paths and methods are refused before anything happens', asy
     ['GET', '/api/golive', 404, 'Not found.'],
     ['GET', '/api/golive/', 404, 'Not found.'],
     ['GET', path('', OTHER_ID), 404, 'No site with that id.'],
-    ['POST', path('check', SITE_ID.toUpperCase()), 404, 'No site with that id.'],
+    ['POST', path('check', '7'), 404, 'No site with that id.'],
+    ['POST', path('check', SITE_ID + 'a'), 404, 'No site with that id.'],
     ['POST', path('check', '..%2F..%2Fsites'), 404, 'No site with that id.'],
     ['POST', path('delete'), 404, 'Not found.'],
     ['POST', path('check') + '/again', 404, 'Not found.'],
@@ -1074,8 +1075,8 @@ test('signin sends the browser back to the page, and only ever to a fixed addres
   assert.equal(ok.headers.get('location'), '/#golive=' + SITE_ID);
   for (const [k, v] of Object.entries(HEADERS)) if (k !== 'content-type') assert.equal(ok.headers.get(k), v, k);
 
-  for (const query of ['', '?site=', '?site=' + SITE_ID.toUpperCase(), '?site=https://evil.example/',
-    '?site=' + encodeURIComponent('//evil.example/' + SITE_ID.slice(15)), '?site=' + SITE_ID + 'x', '?other=' + SITE_ID]) {
+  for (const query of ['', '?site=', '?site=7', '?site=https://evil.example/',
+    '?site=' + encodeURIComponent('//evil.example/' + SITE_ID), '?site=' + SITE_ID + 'x', '?other=' + SITE_ID]) {
     const r = await signin(w, query);
     assert.equal(r.headers.get('location'), '/', query);
   }

@@ -19,7 +19,7 @@ const ACCOUNT = 'acc00000000000000000000000000001';
 const ZONE = 'e0000000000000000000000000000001';      // acme.com, the client
 const DESK_ZONE = 'e0000000000000000000000000000002'; // 10xid.com, the desk's own
 const OTHER_ZONE = 'e0000000000000000000000000000003'; // other.com, another client
-const SITE_ID = '3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b';
+const SITE_ID = '0007';
 const REF = 'desk-' + SITE_ID;
 const STAGING = 'staging-acme.10xid.com';
 const W = 'staging-acme';
@@ -1095,7 +1095,7 @@ test('the switch guard: a record or domain the plan could not have made stops it
     { redirect: { ...base.redirect, from: 'shop.acme.com' } },
     { redirect: { ...base.redirect, to: 'acme.com" or true or "x' } },
     { redirect: { ...base.redirect, from: 'acme.com' } },
-    { redirect: { ...base.redirect, ref: 'desk-00000000-0000-4000-8000-000000000000' } },
+    { redirect: { ...base.redirect, ref: 'desk-9999' } },
   ];
   for (const change of bad) {
     const req = request(w);

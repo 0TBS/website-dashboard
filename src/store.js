@@ -48,7 +48,7 @@ export class Store {
   create(fields) {
     return this.#write(async (tx) => {
       const now = new Date().toISOString();
-      const id = crypto.randomUUID();
+      const id = await nextId(tx, 'sites');
       const values = COLUMNS.map((c) => (c in fields ? fields[c] : null));
       await tx.run(
         `INSERT INTO sites (id, ${COLUMNS.join(', ')}, created_at, updated_at)
@@ -154,7 +154,7 @@ export class Store {
       if (!(await tx.row('SELECT id FROM sites WHERE id = ?', siteId))) return { missing: true };
       if (spec.unique && await taken(tx, spec, siteId, fields[spec.unique])) return { duplicate: spec.unique };
       const now = new Date().toISOString();
-      const id = crypto.randomUUID();
+      const id = await nextId(tx, spec.table);
       const columns = Object.keys(spec.fields);
       await tx.run(
         `INSERT INTO ${spec.table} (id, site_id, ${columns.join(', ')}, created_at, updated_at)
@@ -194,8 +194,9 @@ export class Store {
   }
 
   // The copy from the Durable Object, once. → the counts copied, or null when
-  // it was done before. Rows keep their ids, times and log numbers, and make
-  // no history: they are not changes.
+  // it was done before. Rows keep their times and log numbers, and make no
+  // history: they are not changes. Each site gets the next number, in the
+  // order the sites were made, and its go-live record follows it.
   hasImported() {
     return this.#read(async (tx) => !!(await tx.row("SELECT value FROM desk_meta WHERE key = 'imported_from_do'")));
   }
@@ -205,11 +206,17 @@ export class Store {
       if (await tx.row("SELECT value FROM desk_meta WHERE key = 'imported_from_do'")) return null;
       await tx.run("SELECT set_config('desk.importing', 'on', true)");
       const counts = {};
+      const renumbered = new Map();
+      const sites = [...(dump?.sites ?? [])].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+      for (const site of sites) renumbered.set(site.id, await nextId(tx, 'sites'));
+      const numbered = (table, row) => (table === 'sites'
+        ? { ...row, id: renumbered.get(row.id) }
+        : { ...row, site_id: renumbered.get(row.site_id) ?? row.site_id });
       for (const table of IMPORTED) {
         const known = new Set((await tx.rows(
           'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?', table
         )).map((c) => c.column_name));
-        const rows = dump?.[table] ?? [];
+        const rows = (table === 'sites' ? sites : dump?.[table] ?? []).map((row) => numbered(table, row));
         counts[table] = 0;
         for (const row of rows) {
           const columns = Object.keys(row).filter((c) => known.has(c));
@@ -234,6 +241,14 @@ export class Store {
       return counts;
     });
   }
+}
+
+// The next id for a row of `table`: 0001, 0002 … 9999, 10000, from the
+// table's own counter (schema.js, step 4). A number is never handed out
+// twice, even when a row is removed or its insert is undone.
+async function nextId(tx, table) {
+  const { n } = await tx.row(`SELECT nextval('${table}_number')::int AS n`);
+  return String(n).padStart(4, '0');
 }
 
 async function readItem(tx, kind, siteId, id) {

@@ -12,6 +12,10 @@
 
 import { transaction } from './db.js';
 
+// Every table that holds a site's details, as step 4 found them.
+const DETAIL_TABLES = ['site_services', 'site_contacts', 'site_domains',
+  'site_tiktok', 'site_linkedin', 'site_facebook', 'site_x', 'site_instagram'];
+
 const NOW = `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
 
 export const MIGRATIONS = [
@@ -219,18 +223,47 @@ export const MIGRATIONS = [
     `CREATE TRIGGER site_${platform}_history AFTER INSERT OR UPDATE OR DELETE ON site_${platform}
       FOR EACH ROW EXECUTE FUNCTION desk_history('${platform}')`,
   ]),
+
+
+  // 4. Ids a person can read: 0001, 0002, 0003, in the order rows were
+  // made, each table counting on its own, and past 9999 simply 10000. Every
+  // row already here is renumbered, and everything that names it (a site's
+  // details, its go-live record and log, the history) follows. A renumber is
+  // not a change to the site, so the history triggers stand aside for it.
+  // From here on store.js takes each new id from the table's own counter.
+  [
+    "SELECT set_config('desk.importing', 'on', true)",
+    // A site's details follow its id from now on, whatever changes it.
+    ...DETAIL_TABLES.map((t) => `ALTER TABLE ${t}
+      DROP CONSTRAINT ${t}_site_id_fkey,
+      ADD CONSTRAINT ${t}_site_id_fkey FOREIGN KEY (site_id) REFERENCES sites (id) ON DELETE CASCADE ON UPDATE CASCADE`),
+    ...['sites', ...DETAIL_TABLES].flatMap((t) => [
+      `CREATE TEMP TABLE ${t}_renumber ON COMMIT DROP AS
+        SELECT id AS old, CASE WHEN n < 10000 THEN lpad(n::text, 4, '0') ELSE n::text END AS new
+        FROM (SELECT id, row_number() OVER (ORDER BY created_at, id) AS n FROM ${t}) AS numbered`,
+      `UPDATE ${t} SET id = r.new FROM ${t}_renumber r WHERE ${t}.id = r.old`,
+      `CREATE SEQUENCE ${t}_number`,
+      `SELECT setval('${t}_number', GREATEST(count(*), 1), count(*) > 0) FROM ${t}`,
+    ]),
+    ...['golive', 'golive_log', 'golive_checks', 'history'].map((t) =>
+      `UPDATE ${t} SET site_id = r.new FROM sites_renumber r WHERE ${t}.site_id = r.old`),
+    ...Object.entries({ site: 'sites', service: 'site_services', contact: 'site_contacts', domain: 'site_domains',
+      tiktok: 'site_tiktok', linkedin: 'site_linkedin', facebook: 'site_facebook', x: 'site_x', instagram: 'site_instagram' })
+      .map(([item, t]) => `UPDATE history SET item_id = r.new FROM ${t}_renumber r WHERE history.item = '${item}' AND history.item_id = r.old`),
+  ],
 ];
 
-// Brings the database up to the last step. Safe to call from every request
-// at once: the lock makes the others wait, and they then find nothing to do.
-export async function migrate(connect) {
+// Brings the database up to the last step (or to `upTo`, for a test that
+// needs the shape as it was). Safe to call from every request at once: the
+// lock makes the others wait, and they then find nothing to do.
+export async function migrate(connect, { upTo = MIGRATIONS.length } = {}) {
   return transaction(connect, async (tx) => {
     await tx.run(`CREATE TABLE IF NOT EXISTS schema_migrations (
       version    INTEGER PRIMARY KEY,
       applied_at TEXT NOT NULL
     )`);
     const done = (await tx.row('SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations')).v;
-    for (let v = done + 1; v <= MIGRATIONS.length; v++) {
+    for (let v = done + 1; v <= upTo; v++) {
       for (const statement of MIGRATIONS[v - 1]) await tx.run(statement);
       await tx.run('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)', v, new Date().toISOString());
     }

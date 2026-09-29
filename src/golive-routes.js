@@ -20,9 +20,9 @@ import {
   buildPlan, preflight, planHash, checksDigest, requiredAcks, restoreCost, switchOn, restore, verify, isReady, SwitchError,
 } from './golive.js';
 
-// A site id as crypto.randomUUID() makes them. Nothing else reaches the
+// A site id as store.js makes them: 0001, 0002 … Nothing else reaches the
 // database or an address the desk redirects to.
-const SITE_ID = /^[0-9a-f-]{36}$/;
+const SITE_ID = /^[0-9]{4,12}$/;
 
 // The Cloudflare settings. access.js names the Access ones. Not CF_API_TOKEN
 // and CF_ACCOUNT_ID: wrangler reads those from a developer's shell as its own

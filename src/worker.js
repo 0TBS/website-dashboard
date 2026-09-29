@@ -187,8 +187,8 @@ function unavailable(e) {
   return json({ error: 'The desk could not reach its database. Try again in a moment.', code: 'database-unavailable' }, 503);
 }
 
-// Ids as crypto.randomUUID() makes them. Anything else is not one of ours.
-const ID = /^[0-9a-f-]{36}$/;
+// Ids as store.js makes them: 0001, 0002 … 10000. Anything else is not one of ours.
+const ID = /^[0-9]{4,12}$/;
 
 // The updated_at an editor started from, when it sends one.
 function expectedFrom(body) {
