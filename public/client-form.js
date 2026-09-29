@@ -230,7 +230,11 @@
     'bad-key': 'That is not the desk key. Check it and try again.',
     'stale-session': 'The desk key has changed since this browser logged in. Enter the new key.',
   };
+  // Asking for the key again (it was changed, or this browser logged off)
+  // only hides the form: what was typed stays, and comes back on unlock.
+  let wasDone = false;
   function lock(why) {
+    wasDone = !$('cf-done').hidden;
     form.hidden = true;
     $('cf-done').hidden = true;
     note.textContent = '';
@@ -251,6 +255,9 @@
     start();
   });
 
+  // The form is drawn once. After that, start() only checks the login again
+  // and shows the form as it was left; "Fill in another" is what empties it.
+  let drawn = false;
   async function start() {
     note.hidden = false;
     note.textContent = 'Loading the form…';
@@ -265,9 +272,14 @@
     gate.hidden = true;
     note.textContent = '';
     note.hidden = true;
+    if (drawn) {
+      if (wasDone) $('cf-done').hidden = false; else form.hidden = false;
+      return;
+    }
     $('cf-options').innerHTML = choices.options.map(([k, l]) =>
       `<label class="cftick"><input type="checkbox" data-f="${esc(k)}"><span>${esc(l)}</span></label>`).join('');
     fresh();
+    drawn = true;
   }
   start();
 })();
