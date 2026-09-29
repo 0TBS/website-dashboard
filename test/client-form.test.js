@@ -9,7 +9,7 @@ const FORM = {
   business: ' Acme Glass ',
   live_url: 'https://www.AcmeGlass.com/',
   contact: { name: 'Ana Lee', email: 'Ana@AcmeGlass.com', phone: '416 555 0100' },
-  associates: [
+  delegates: [
     { name: 'Bo Chan', email: 'bo@acmeglass.com', phone: '', position: 'Office manager' },
     { name: '', email: '', phone: '', position: '' },
   ],
@@ -60,10 +60,10 @@ test('each error names the box on the form that is wrong', () => {
     ['contact.email', 'Contact: Email is required.']);
   assert.deepEqual(fieldOf(() => cleanClientForm({ ...FORM, contact: { ...FORM.contact, email: 'ana at acme' } })),
     ['contact.email', 'Contact: Email is not an email address.']);
-  assert.deepEqual(fieldOf(() => cleanClientForm({ ...FORM, associates: [{}, { position: 'Owner' }] })),
-    ['associates.1.name', 'Associate 2: Name is required.']);
-  assert.equal(fieldOf(() => cleanClientForm({ ...FORM, associates: [{ name: 'Bo', position: 'x'.repeat(121) }] }))[0],
-    'associates.0.position');
+  assert.deepEqual(fieldOf(() => cleanClientForm({ ...FORM, delegates: [{}, { position: 'Owner' }] })),
+    ['delegates.1.name', 'Delegate 2: Name is required.']);
+  assert.equal(fieldOf(() => cleanClientForm({ ...FORM, delegates: [{ name: 'Bo', position: 'x'.repeat(121) }] }))[0],
+    'delegates.0.position');
   assert.deepEqual(fieldOf(() => cleanClientForm({ ...FORM, services: [{ login: 'the office login' }] })),
     ['services.0.kind', 'Service 1: Kind is required.']);
   assert.equal(fieldOf(() => cleanClientForm({ ...FORM, services: [{ kind: 'myspace' }] }))[0], 'services.0.kind');
@@ -72,7 +72,7 @@ test('each error names the box on the form that is wrong', () => {
   assert.deepEqual(fieldOf(() => cleanClientForm({ ...FORM, jobs: [{ url: 'a.com' }, { url: 'https://A.com/' }] })),
     ['jobs.1.url', 'Job 2: That URL is already in the list.']);
   assert.equal(fieldOf(() => cleanClientForm({ ...FORM, jobs: 'a.com' }))[0], 'jobs');
-  assert.equal(fieldOf(() => cleanClientForm({ ...FORM, associates: Array(21).fill({ name: 'x' }) }))[0], 'associates');
+  assert.equal(fieldOf(() => cleanClientForm({ ...FORM, delegates: Array(21).fill({ name: 'x' }) }))[0], 'delegates');
   assert.equal(fieldOf(() => cleanClientForm(null))[0], null);
 });
 
