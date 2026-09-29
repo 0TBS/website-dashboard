@@ -10,6 +10,7 @@
 import { transaction } from './db.js';
 import { toJson, COLUMNS } from './sites.js';
 import { ITEMS, itemJson } from './details.js';
+import { OPTIONS, hostOf } from './client-form.js';
 import * as golive from './golive-store.js';
 
 const HISTORY_LIMIT = 200;
@@ -138,6 +139,7 @@ export class Store {
         const rows = await tx.rows(`SELECT * FROM ${spec.table} WHERE site_id = ? ORDER BY ${spec.order}`, siteId);
         out[kind] = rows.map((r) => itemJson(kind, r));
       }
+      out.client_form = clientFormJson(await tx.row('SELECT * FROM client_forms WHERE site_id = ?', siteId));
       out.history = await tx.rows(
         `SELECT id, at, who, item, item_id, action, field, old_value, new_value
          FROM history WHERE site_id = ? ORDER BY id DESC LIMIT ?`,
@@ -153,15 +155,7 @@ export class Store {
     return this.#write(async (tx) => {
       if (!(await tx.row('SELECT id FROM sites WHERE id = ?', siteId))) return { missing: true };
       if (spec.unique && await taken(tx, spec, siteId, fields[spec.unique])) return { duplicate: spec.unique };
-      const now = new Date().toISOString();
-      const id = await nextId(tx, spec.table);
-      const columns = Object.keys(spec.fields);
-      await tx.run(
-        `INSERT INTO ${spec.table} (id, site_id, ${columns.join(', ')}, created_at, updated_at)
-         VALUES (?, ?, ${columns.map(() => '?').join(', ')}, ?, ?)`,
-        id, siteId, ...columns.map((c) => fields[c] ?? null), now, now
-      );
-      return { item: await readItem(tx, kind, siteId, id) };
+      return { item: await insertItem(tx, kind, siteId, fields) };
     });
   }
 
@@ -191,6 +185,43 @@ export class Store {
       await tx.run(`DELETE FROM ${ITEMS[kind].table} WHERE id = ? AND site_id = ?`, itemId, siteId);
       return true;
     });
+  }
+
+  // The client form (client-form.js has cleaned it). The client must not be
+  // on the desk already: the check and the writes run under the desk's lock,
+  // so two forms for the same client sent at once cannot both land.
+  // → { site } · { exists: { field, site: { id, name } } }.
+  createClient(form) {
+    return this.#write(async (tx) => {
+      const exists = await findClient(tx, {
+        name: form.site.name, host: hostOf(form.site.live_domain), email: form.contacts[0]?.email?.toLowerCase() ?? null,
+      });
+      if (exists) return { exists };
+      const now = new Date().toISOString();
+      const id = await nextId(tx, 'sites');
+      const values = COLUMNS.map((c) => (c in form.site ? form.site[c] : null));
+      await tx.run(
+        `INSERT INTO sites (id, ${COLUMNS.join(', ')}, created_at, updated_at)
+         VALUES (?, ${COLUMNS.map(() => '?').join(', ')}, ?, ?)`,
+        id, ...values, now, now
+      );
+      for (const c of form.contacts) await insertItem(tx, 'contacts', id, c);
+      for (const s of form.services) await insertItem(tx, 'services', id, s);
+      for (const j of form.jobs) await insertItem(tx, 'jobs', id, j);
+      const keys = OPTIONS.map(([k]) => k);
+      await tx.run(
+        `INSERT INTO client_forms (id, site_id, ${keys.join(', ')}, created_at, updated_at)
+         VALUES (?, ?, ${keys.map(() => '?').join(', ')}, ?, ?)`,
+        await nextId(tx, 'client_forms'), id, ...keys.map((k) => form.options[k] ? 1 : 0), now, now
+      );
+      return { site: await golive.siteWithGolive(tx, id) };
+    });
+  }
+
+  // Whether a client is on the desk already, for the form to say so before
+  // it is sent. → { field, site: { id, name } } or null.
+  findClient(query) {
+    return this.#read((tx) => findClient(tx, query));
   }
 
   // The copy from the Durable Object, once. → the counts copied, or null when
@@ -251,11 +282,64 @@ async function nextId(tx, table) {
   return String(n).padStart(4, '0');
 }
 
+// One detail row, with the next id of its table. The caller has checked the
+// site is there and the row is not a duplicate.
+async function insertItem(tx, kind, siteId, fields) {
+  const spec = ITEMS[kind];
+  const now = new Date().toISOString();
+  const id = await nextId(tx, spec.table);
+  const columns = Object.keys(spec.fields);
+  await tx.run(
+    `INSERT INTO ${spec.table} (id, site_id, ${columns.join(', ')}, created_at, updated_at)
+     VALUES (?, ?, ${columns.map(() => '?').join(', ')}, ?, ?)`,
+    id, siteId, ...columns.map((c) => fields[c] ?? null), now, now
+  );
+  return readItem(tx, kind, siteId, id);
+}
+
+// A client already on the desk: a site whose live domain, or any domain
+// listed for it, is the same host (with or without www.); a site with the
+// same name, whatever the case; or a contact with the same email. The first
+// that matches, in that order. `query` is { name, host, email }, each null
+// when not given.
+const BARE = (col) => `regexp_replace(split_part(split_part(${col}, '/', 1), ':', 1), '^www\\.', '')`;
+async function findClient(tx, { name, host, email }) {
+  const hit = (field, row) => (row ? { field, site: { id: row.id, name: row.name } } : null);
+  if (host) {
+    const row = await tx.row(
+      `SELECT id, name FROM sites WHERE ${BARE('live_domain')} = ?
+       UNION ALL
+       SELECT s.id, s.name FROM site_domains d JOIN sites s ON s.id = d.site_id WHERE ${BARE('d.hostname')} = ?
+       LIMIT 1`, host, host);
+    if (row) return hit('live_url', row);
+  }
+  if (name) {
+    const row = await tx.row('SELECT id, name FROM sites WHERE lower(name) = lower(?) ORDER BY id LIMIT 1', name);
+    if (row) return hit('business', row);
+  }
+  if (email) {
+    const row = await tx.row(
+      `SELECT s.id, s.name FROM site_contacts c JOIN sites s ON s.id = c.site_id
+       WHERE lower(c.email) = ? ORDER BY s.id LIMIT 1`, email);
+    if (row) return hit('contact.email', row);
+  }
+  return null;
+}
+
+// The form's ticks as true/false, with when it was sent; null for a site
+// that was added on the desk rather than from the form.
+function clientFormJson(row) {
+  if (!row) return null;
+  const out = { id: row.id, created_at: row.created_at, updated_at: row.updated_at };
+  for (const [k] of OPTIONS) out[k] = row[k] === 1;
+  return out;
+}
+
 async function readItem(tx, kind, siteId, id) {
   const row = await tx.row(`SELECT * FROM ${ITEMS[kind].table} WHERE id = ? AND site_id = ?`, id, siteId);
   return row ? itemJson(kind, row) : null;
 }
 
-// A domain, or a social media link, is listed once per site.
+// A domain, a job's URL, or a social media link, is listed once per site.
 const taken = (tx, spec, siteId, value) =>
   tx.row(`SELECT id FROM ${spec.table} WHERE site_id = ? AND ${spec.unique} = ?`, siteId, value);

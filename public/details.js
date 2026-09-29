@@ -1,4 +1,5 @@
-// A site's services and accounts, contacts, domains, social media and history, shown in
+// A site's services and accounts, contacts, domains, job list, social media,
+// client form and history, shown in
 // its opened row. Read from /api/sites/:id/details each time the row opens,
 // and again after every change made here, so the history is always current.
 //
@@ -51,7 +52,23 @@
         { name: 'notes', label: 'Notes', type: 'textarea', max: 2000 },
       ],
     },
+    // The client form's job list: a URL and the work it needs.
+    jobs: {
+      noun: 'job', a: 'a URL', title: 'Job info',
+      empty: 'No URLs with work listed yet.',
+      fields: [
+        { name: 'url', label: 'URL', max: 300, required: true, placeholder: 'clientsite.com/page', inputmode: 'url' },
+        { name: 'clone', label: 'Clone', type: 'select', flag: true, group: 1 },
+        { name: 'database_b2', label: 'Database / Backblaze B2', type: 'select', flag: true, group: 1 },
+        { name: 'seo_ppc', label: 'SEO / PPC', type: 'select', flag: true, group: 1 },
+        { name: 'live', label: 'Live', type: 'select', flag: true, group: 1 },
+        { name: 'notes', label: 'Notes', type: 'textarea', max: 2000 },
+      ],
+    },
   };
+  const JOB_TASKS = KINDS.jobs.fields.filter((f) => f.flag).map((f) => [f.name, f.label]);
+  // The client form's ticks (src/client-form.js), shown under Client form.
+  const FORM_OPTIONS = [['notify_rep', 'Notify rep (me)'], ['notify_client', 'Notify client'], ['competitor_analysis', 'Competitor analysis']];
 
   // Each social media platform is a kind of its own, with its own table on
   // the Worker, and they are shown together under one section. Adding one
@@ -73,9 +90,9 @@
     empty: 'No social media links yet.', hint: SOCIAL_HINT, kinds: SOCIAL.map(([platform]) => platform),
     fields: [{ name: 'platform', label: 'Platform', type: 'select', choices: 'social_platforms', required: true }, ...SOCIAL_FIELDS],
   };
-  const ORDER = ['services', 'contacts', 'domains', 'socials'];
+  const ORDER = ['services', 'contacts', 'domains', 'jobs', 'socials'];
   const ITEM_KIND = {
-    service: 'services', contact: 'contacts', domain: 'domains',
+    service: 'services', contact: 'contacts', domain: 'domains', job: 'jobs',
     ...Object.fromEntries(SOCIAL.map(([platform]) => [platform, platform])),
   };
   // Every kind that has items, and the section each is shown in.
@@ -141,7 +158,7 @@
       : 'Could not load this site’s details: ' + e.err)}
       <button class="linkbtn" type="button" data-dact="retry">Try again</button></p>`;
     if (!e.data) return err || '<p class="dtnote" role="status">Loading services, contacts, domains and social media…</p>';
-    return (err || '') + ORDER.map((kind) => sectionHtml(id, e, kind)).join('') + historyHtml(id, e);
+    return (err || '') + ORDER.map((kind) => sectionHtml(id, e, kind)).join('') + clientFormHtml(e) + historyHtml(id, e);
   }
 
   function sectionHtml(id, e, kind) {
@@ -200,6 +217,7 @@
     if (kind === 'services') return [labelOf(choices.service_kinds, it.kind), it.identifier].filter(Boolean).join(' ');
     if (kind === 'contacts') return it.name || '';
     if (kind === 'domains') return it.hostname || '';
+    if (kind === 'jobs') return it.url || '';
     const where = it.handle ? '@' + it.handle : (it.url || '').replace(/^https:\/\/(www\.)?/, '');
     return [KINDS[kind] ? KINDS[kind].platform : kind, where].filter(Boolean).join(' ');
   }
@@ -221,6 +239,13 @@
       rows = [
         it.email && link('Email', it.email, 'mailto:' + it.email, `${it.name}’s email address`),
         it.phone && link('Phone', it.phone, telHref(it.phone), `${it.name}’s phone number`),
+        notes(it.notes),
+      ];
+    } else if (kind === 'jobs') {
+      const work = JOB_TASKS.filter(([t]) => it[t] === true).map(([, l]) => l);
+      head = `<p class="dtt">${work.length ? esc(work.join(' · ')) : '<span class="dtsub">No work ticked</span>'}</p>`;
+      rows = [
+        link('URL', it.url, 'https://' + it.url, `the URL ${it.url}`, true),
         notes(it.notes),
       ];
     } else if (KINDS[kind].section === 'socials') {
@@ -249,6 +274,17 @@
       <div class="dtih">${head}<span class="btns">${btn('edit', 'Edit')}${btn('remove', 'Remove', ' danger')}</span></div>
       ${rows ? `<dl class="addr dtkv">${rows}</dl>` : ''}
     </li>`;
+  }
+
+  // ---- the client form: what was ticked, for a site that came from it ----
+  function clientFormHtml(e) {
+    const f = e.data.client_form;
+    if (!f) return '';
+    return `<section class="dtsec" aria-label="Client form">
+      <div class="dthead"><p class="sect">Client form</p></div>
+      <p class="dthint">This site was made from the client form ${esc(whenAt(f.created_at))}.</p>
+      <ul class="dtticks">${FORM_OPTIONS.map(([k, l]) => `<li class="flag ${f[k] ? 'f-todo' : 'f-no'}">${esc(l)}: ${f[k] ? 'Yes' : 'No'}</li>`).join('')}</ul>
+    </section>`;
   }
 
   // ---- history ----
@@ -285,7 +321,9 @@
     }
     if (field === 'kind') return labelOf(choices.service_kinds, v);
     if (field === 'role' && item === 'domain') return labelOf(choices.domain_roles, v);
-    if (field === 'dns_on_cloudflare') return v === '1' ? 'Yes' : v === '0' ? 'No' : v;
+    if (field === 'dns_on_cloudflare' || item === 'job' || item === 'client_form') {
+      if (field !== 'url' && field !== 'notes') return v === '1' ? 'Yes' : v === '0' ? 'No' : v;
+    }
     if (field === 'renews_on') return dayText(v);
     return v;
   }
@@ -293,6 +331,7 @@
     if (item === 'site') {
       try { return fieldLabel(field); } catch { return field; }
     }
+    if (item === 'client_form') return (FORM_OPTIONS.find(([k]) => k === field) || [field, field])[1];
     const f = (KINDS[ITEM_KIND[item]] || { fields: [] }).fields.find((x) => x.name === field);
     return f ? f.label : field;
   }
@@ -301,7 +340,7 @@
   // "service G-ABC", or "Instagram link @acme" rather than "instagram Instagram @acme".
   function itemWords(kind, item, name) {
     const platform = KINDS[kind] && KINDS[kind].platform;
-    const noun = platform ? KINDS[kind].noun : item;
+    const noun = platform ? KINDS[kind].noun : item === 'client_form' ? 'the client form' : item;
     const rest = platform && name.startsWith(platform + ' ') ? name.slice(platform.length + 1) : name;
     return esc(noun) + (rest ? ` <span class="dtval">${esc(clip(rest))}</span>` : '');
   }

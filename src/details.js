@@ -1,6 +1,6 @@
 // Everything about a site beyond its one row in `sites`: the services and
-// accounts it uses, the client's people, its domains in detail, and its
-// social media accounts. A site
+// accounts it uses, the client's people, its domains in detail, the job list
+// from the client form, and its social media accounts. A site
 // can have any number of each, so each is a table of its own (schema.js).
 // Like sites.js, this is the one place that says what each field may hold,
 // and the Worker, the page (through /api/sites/:id/details) and the tests all
@@ -14,6 +14,8 @@ import { InvalidField, normalizeAddress, normalizeFlag, normalizeText } from './
 // The kinds of service, in the order the page offers them. A new kind is a
 // line here; the database does not check the list, so it needs no migration.
 export const SERVICE_KINDS = [
+  ['godaddy', 'GoDaddy'],
+  ['cloudflare', 'Cloudflare account'],
   ['cloudflare_worker', 'Cloudflare Worker'],
   ['cloudflare_zone', 'Cloudflare zone'],
   ['backblaze_bucket', 'Backblaze B2 bucket'],
@@ -52,6 +54,14 @@ export const SOCIAL_PLATFORMS = [
   ['facebook', 'Facebook', ['facebook.com', 'fb.com', 'fb.me']],
   ['x', 'X', ['x.com', 'twitter.com']],
   ['instagram', 'Instagram', ['instagram.com', 'instagr.am']],
+];
+
+// The work a URL on the client form can need, one tick each (site_jobs).
+export const JOB_TASKS = [
+  ['clone', 'Clone'],
+  ['database_b2', 'Database / Backblaze B2'],
+  ['seo_ppc', 'SEO / PPC'],
+  ['live', 'Live'],
 ];
 
 const TEXT = { short: 120, identifier: 200, notes: 2000, registrar: 80, phone: 40, handle: 100 };
@@ -193,6 +203,22 @@ export const ITEMS = {
     order: 'hostname',
     unique: 'hostname',
   },
+  // The client form's job list: a URL (an address, with a path if it has
+  // one) and the work it needs.
+  jobs: {
+    table: 'site_jobs',
+    item: 'job',
+    noun: 'job',
+    fields: {
+      url: ['URL', normalizeAddress],
+      ...Object.fromEntries(JOB_TASKS.map(([task, label]) => [task, [label, normalizeFlag]])),
+      notes: ['Notes', text(TEXT.notes)],
+    },
+    required: ['url'],
+    flags: JOB_TASKS.map(([task]) => task),
+    order: 'created_at, id',
+    unique: 'url',
+  },
   // One kind per social media platform, each with its own table. The page
   // shows them together, under Social media (`group`).
   ...Object.fromEntries(SOCIAL_PLATFORMS.map(([platform, label, domains]) => [platform, {
@@ -248,5 +274,6 @@ export function itemJson(kind, row) {
 export const CHOICES = {
   service_kinds: SERVICE_KINDS,
   domain_roles: DOMAIN_ROLES,
+  job_tasks: JOB_TASKS,
   social_platforms: SOCIAL_PLATFORMS.map(([value, label]) => [value, label]),
 };

@@ -67,7 +67,7 @@ test('the error names the field and says what is wrong in plain words', () => {
     assert.equal(e.field, 'url');
     assert.equal(e.message, 'Link is not a link.');
   }
-  assert.deepEqual(KINDS, ['services', 'contacts', 'domains', 'tiktok', 'linkedin', 'facebook', 'x', 'instagram']);
+  assert.deepEqual(KINDS, ['services', 'contacts', 'domains', 'jobs', 'tiktok', 'linkedin', 'facebook', 'x', 'instagram']);
 });
 
 test('each social platform takes only its own profile links, kept as https', () => {

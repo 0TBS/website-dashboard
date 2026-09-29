@@ -37,25 +37,45 @@ Each site also keeps its details, each with Add, Edit and Remove:
 
 | Section | Holds |
 | --- | --- |
-| Services & accounts | Every account or resource the site uses: its Cloudflare Worker and zone, Backblaze bucket, database, Tag Manager, Analytics, Search Console, Google Ads, Business Profile, reCAPTCHA, Resend, Cal.com, Stripe, WordPress admin and other hosting. Each has its ID or name, a link to its dashboard, which account owns it, and notes. |
+| Services & accounts | Every account or resource the site uses: its GoDaddy and Cloudflare accounts, its Cloudflare Worker and zone, Backblaze bucket, database, Tag Manager, Analytics, Search Console, Google Ads, Business Profile, reCAPTCHA, Resend, Cal.com, Stripe, WordPress admin and other hosting. Each has its ID or name, a link to its dashboard, which account owns it, and notes. |
 | Contacts | The client's people: name, role, email, phone and notes. |
 | Domains | Every domain the site uses, and what for (live, staging, images, redirects, old domains), with its registrar, whether its DNS is on Cloudflare, and when it renews. |
+| Job info | One row per URL with work to do, and a tick for each job it needs: Clone, Database / Backblaze B2, SEO / PPC, Live. |
 | Social media | The site's TikTok, LinkedIn, Facebook, X and Instagram accounts: the profile link, the handle, which account owns it, and notes. Add asks for the platform first. A link must be on that platform's own domain, so a TikTok link to instagram.com is refused. |
+| Client form | For a site made from the client form: whether it asked to notify the rep, notify the client, and do a competitor analysis. |
 | History | Every change to the site and its details: when, who (when the desk knows), which field, and what it was before. |
 
 **Never put a password or API key in the desk.** Everyone with the desk key could read it. Write where the login lives instead, such as "1Password → Acme → Cloudflare".
 
 A site's row can also **Go live**: point its live domain at its staging Worker. The desk checks everything first, saves today's DNS records so the switch can be rolled back, and asks you to confirm. See [Going live from the desk](#going-live-from-the-desk).
 
+## The client form
+
+**Client form** in the header opens `/client-form`: a new client in one go, from the sketch the team works from. It uses the desk's own login, so only someone with the desk key can fill it in or send it.
+
+| Part | Becomes |
+| --- | --- |
+| Contact information: name, email, phone number, business | The site (named after the business), and its first contact, with the role *Main contact*. Name, email and business are required. |
+| Associate information: name, email, phone number, job position | More contacts, the job position as their role. **+ Add associate** adds a row; an empty row is skipped. |
+| Live website URL | The site's live domain. |
+| Services & accounts: a service, and its login info | Services: GoDaddy, Cloudflare, Backblaze B2 and every other kind the desk knows. Login info goes in the service's Account and says where the login lives. A line that looks like a password (`password: …`, `pw=…`) is refused. |
+| Job info: a URL, with Clone, Database / Backblaze B2, SEO / PPC and Live ticks | The site's job list. **+ Add URL** adds a row. The first row takes the live website URL unless something else is typed there. Any URL ticked for SEO / PPC sets the site's SEO / PPC to *Needed*. |
+| Notify rep (me), Notify client, Competitor analysis | Saved with the site, under Client form. The desk does not send any email yet. |
+
+**A client already on the desk cannot get a second form.** As the business name, live website URL and contact email are typed, the form checks the desk, and if the client is there it says which site and turns Save off. A client counts as already there when a site has the same live website (with or without `www.`, whatever the path), or lists that domain under its Domains, or has the same name (whatever the case), or has a contact with the same email. The Worker checks again when the form is sent, under the desk's lock, so two forms for one client sent at once cannot both land.
+
+Everything from one form is saved in one transaction: all of it, or, if anything is refused, none of it. The form then links to the new site on the desk (`/#site=<id>`, which opens that row).
+
 ## How it is built
 
-- **Cloudflare Worker** (`src/worker.js`) serves the page from `public/` and answers `/api/sites` and `/api/golive/*`.
+- **Cloudflare Worker** (`src/worker.js`) serves the page from `public/` and answers `/api/sites`, `/api/client-form` and `/api/golive/*`.
 - **Postgres on Neon** holds everything: Neon project `website-desk` (`small-bird-63386345`) in AWS US East, database `desk`, on the Branding org's free plan. The Worker reaches it with `pg` over a TCP socket, at the address in the `DATABASE_URL` secret. The tables:
 
   | Table | Holds |
   | --- | --- |
   | `sites` | One row per site: the fields in the table above. |
-  | `site_services`, `site_contacts`, `site_domains` | A site's details, any number of each. They go when the site is deleted. |
+  | `site_services`, `site_contacts`, `site_domains`, `site_jobs` | A site's details, any number of each. They go when the site is deleted. |
+  | `client_forms` | For a site made from the client form, its three ticks. It goes when the site is deleted. |
   | `site_tiktok`, `site_linkedin`, `site_facebook`, `site_x`, `site_instagram` | One table per social media platform: `handle`, `url` (the profile link, once per site), `account` and `notes`. They go when the site is deleted. A new platform needs a new table, so it is a new schema step plus one line in `src/details.js`. |
   | `history` | One row per field changed, and one per row added or removed. The database writes it itself, with a trigger, so no change can skip it. It is kept when the site is deleted. |
   | `golive`, `golive_log`, `golive_checks` | Going live: where each site's go-live stands, every step it took, and the last check. |
@@ -65,6 +85,7 @@ A site's row can also **Go live**: point its live domain at its staging Worker. 
 - **The schema** is in `src/schema.js` as numbered steps. The Worker runs any it has not run yet the first time it reaches the database, so a deploy needs nothing run by hand. A change to the shape is a new step at the end. A step already on the live database is never edited.
 - **One write at a time** (`src/db.js`): each call is one transaction. Every write takes the same Postgres advisory lock first, so writes still run one after another, as they did in the Durable Object. Going live relies on this: a step reads the row, decides, and writes, and nothing lands in between. Reads take no lock.
 - **`src/sites.js`** is the one place that defines a site record: its fields, what each one may hold, and how input is cleaned. For example, `https://www.Example.com/` becomes `www.example.com`, and a GitHub link becomes `owner/repo`. **`src/details.js`** does the same for services, contacts and domains, and holds the list of service kinds. Adding a kind is one line there.
+- **`src/client-form.js`** says what the client form may hold, and cleans it with the rules of `sites.js` and `details.js`, so a contact from the form is the same as one added on the desk.
 - **`src/store.js`** is every read and write the Worker makes.
 - **Going live**: `src/golive.js` holds the checks, the switch, the put-back and the live check; `src/golive-routes.js` answers `/api/golive/*`; `src/golive-store.js` is the SQL for the go-live tables. `src/cloudflare.js` is a small client for the Cloudflare API, `src/access.js` checks the Cloudflare Access login with Web Crypto (no library), and `src/budget.js` counts the calls each request makes. None of them needs the Workers runtime, so `npm test` runs whole switches and rollbacks under plain Node against a fake Cloudflare (`test/fake-cloudflare.js`) and a real Postgres running inside the test process (PGlite, `test/pglite.js`).
 - **The old Durable Object** (`DESK` binding, class `Desk`) held the list until September 2026. The first time the new Worker reached Neon, it copied the object's four tables across in one transaction, keeping every id, time and log number, and recorded that in `desk_meta`. The object now only hands over its data. Its data is left as it was, so the previous Worker version can still be rolled back to. It will be deleted in a later release.
@@ -284,12 +305,16 @@ Scripts send `Authorization: Bearer <DASH_KEY>` with every request. The page use
 | POST | `/api/sites` | a site (`name` required) | `201 { site }` |
 | PATCH | `/api/sites/:id` | only the fields to change, optionally `expected_updated_at` | `{ site }`, or `409 { code: "conflict", site }` if the row changed since that time |
 | DELETE | `/api/sites/:id` | – | `{ deleted: id }`, or `409 { code: "golive-active" }` while the site's go-live still needs someone |
-| GET | `/api/sites/:id/details` | – | `{ services, contacts, domains, tiktok, linkedin, facebook, x, instagram, history, choices }`; `history` is the latest 200 changes, newest first, and `choices` lists the service kinds, domain uses and social media platforms |
+| GET | `/api/sites/:id/details` | – | `{ services, contacts, domains, jobs, tiktok, linkedin, facebook, x, instagram, client_form, history, choices }`; `client_form` is `null` for a site not made from the form, `history` is the latest 200 changes, newest first, and `choices` lists the service kinds, domain uses, job ticks and social media platforms |
 | POST | `/api/sites/:id/:kind` | the new item | `201 { item }` |
 | PATCH | `/api/sites/:id/:kind/:itemId` | only the fields to change, optionally `expected_updated_at` | `{ item }`, or `409 { code: "conflict", item }` if it changed since that time |
 | DELETE | `/api/sites/:id/:kind/:itemId` | – | `{ deleted: itemId }` |
 
-`:kind` is `services`, `contacts`, `domains`, or one of the social media platforms: `tiktok`, `linkedin`, `facebook`, `x`, `instagram`.
+| GET | `/api/client-form` | – | `{ choices }`: the service kinds, job ticks, options and row limits the form offers |
+| GET | `/api/client-form/check?business=&live_url=&email=` | – | `{ exists: null }`, or `{ exists: { error, code: "client-exists", field, site: { id, name } } }` |
+| POST | `/api/client-form` | the form (below) | `201 { site }`; `409 { code: "client-exists", field, site }`; `400 { error, field }`, the field named as a path such as `associates.1.email` or `jobs.0.url` |
+
+`:kind` is `services`, `contacts`, `domains`, `jobs`, or one of the social media platforms: `tiktok`, `linkedin`, `facebook`, `x`, `instagram`.
 | GET | `/api/golive/signin?site=<id>` | – | Where Access sends you back after its login; needs no desk key. `302` to `/#golive=<id>` (`/` if the id is not a site id), or to `/#golive-error=<code>` |
 | GET | `/api/golive/me` | – | `{ email }` |
 | GET | `/api/golive/:id` | – | `{ site, golive, log, last_check }` |
@@ -305,9 +330,11 @@ Field values:
 - `chat_url`: a `claude.ai` link (`claude.ai/code/session_…` is fine; it is stored with `https://`), or `null`. Links anywhere else are refused.
 - `environment`: one line of up to 80 characters, or `null`.
 - `golive` (read only): where the site's go-live stands, or `null` if it never went live from the desk. It says whether there was an error (`has_error`) and what kind (`error_kind`), never its words: those can quote a saved record, so only `/api/golive/:id`, behind Access, has them.
-- A service: `kind` (required; one of `cloudflare_worker`, `cloudflare_zone`, `backblaze_bucket`, `database`, `gtm`, `ga4`, `search_console`, `google_ads`, `business_profile`, `recaptcha`, `resend`, `calcom`, `stripe`, `wordpress`, `hosting`, `other`), `identifier`, `url` (an http or https link), `account` and `notes`.
+- A service: `kind` (required; one of `godaddy`, `cloudflare`, `cloudflare_worker`, `cloudflare_zone`, `backblaze_bucket`, `database`, `gtm`, `ga4`, `search_console`, `google_ads`, `business_profile`, `recaptcha`, `resend`, `calcom`, `stripe`, `wordpress`, `hosting`, `other`), `identifier`, `url` (an http or https link), `account` and `notes`.
 - A contact: `name` (required), `role`, `email`, `phone` and `notes`.
 - A domain: `hostname` (required; a domain without a path, once per site), `role` (required; `live`, `staging`, `image`, `redirect`, `old` or `other`), `registrar`, `dns_on_cloudflare` (`true`, `false` or `null`), `renews_on` (`YYYY-MM-DD`) and `notes`.
+- A job: `url` (required; an address such as `acme.com/shop`, once per site), `clone`, `database_b2`, `seo_ppc` and `live` (`true`, `false` or `null`), and `notes`.
+- The client form: `business` (required), `live_url`, `contact: { name, email, phone }` (name and email required), `associates: [{ name, email, phone, position }]` (up to 20), `services: [{ kind, login }]` (up to 30), `jobs: [{ url, clone, database_b2, seo_ppc, live }]` (up to 50), and `notify_rep`, `notify_client`, `competitor_analysis` (`true` or `false`). Rows left empty are skipped.
 - A social media link (`tiktok`, `linkedin`, `facebook`, `x` or `instagram`): `url` (required; on that platform's own domain, such as `tiktok.com`, or `x.com` or `twitter.com` for X; stored as https; once per site), `handle` (one word, the `@` is dropped), `account` and `notes`.
 - Bad input returns `400 { error, field }`, naming the field that failed.
 - If the database cannot be reached, every request that needs it answers `503 { code: "database-unavailable" }`. After five minutes with no visits, Neon's free plan pauses the database. The next request wakes it, which takes up to a second or two.

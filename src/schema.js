@@ -251,6 +251,42 @@ export const MIGRATIONS = [
       tiktok: 'site_tiktok', linkedin: 'site_linkedin', facebook: 'site_facebook', x: 'site_x', instagram: 'site_instagram' })
       .map(([item, t]) => `UPDATE history SET item_id = r.new FROM ${t}_renumber r WHERE history.item = '${item}' AND history.item_id = r.old`),
   ],
+
+  // 5. The client form (public/client-form.html). Its job list: one row per
+  // URL, with a tick for each piece of work it needs. And the form's own
+  // options, once per site. Both count their ids as step 4 set up, and the
+  // history records them like any other detail.
+  [
+    `CREATE TABLE site_jobs (
+      id          TEXT PRIMARY KEY,
+      site_id     TEXT NOT NULL REFERENCES sites (id) ON DELETE CASCADE ON UPDATE CASCADE,
+      url         TEXT NOT NULL,
+      clone       SMALLINT CHECK (clone IN (0,1)),
+      database_b2 SMALLINT CHECK (database_b2 IN (0,1)),   -- database / Backblaze B2
+      seo_ppc     SMALLINT CHECK (seo_ppc IN (0,1)),
+      live        SMALLINT CHECK (live IN (0,1)),
+      notes       TEXT,
+      created_at  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL,
+      UNIQUE (site_id, url)
+    )`,
+    'CREATE INDEX site_jobs_site ON site_jobs (site_id)',
+    'CREATE SEQUENCE site_jobs_number',
+    `CREATE TRIGGER site_jobs_history AFTER INSERT OR UPDATE OR DELETE ON site_jobs
+      FOR EACH ROW EXECUTE FUNCTION desk_history('job')`,
+    `CREATE TABLE client_forms (
+      id                  TEXT PRIMARY KEY,
+      site_id             TEXT NOT NULL UNIQUE REFERENCES sites (id) ON DELETE CASCADE ON UPDATE CASCADE,
+      notify_rep          SMALLINT NOT NULL CHECK (notify_rep IN (0,1)),
+      notify_client       SMALLINT NOT NULL CHECK (notify_client IN (0,1)),
+      competitor_analysis SMALLINT NOT NULL CHECK (competitor_analysis IN (0,1)),
+      created_at          TEXT NOT NULL,
+      updated_at          TEXT NOT NULL
+    )`,
+    'CREATE SEQUENCE client_forms_number',
+    `CREATE TRIGGER client_forms_history AFTER INSERT OR UPDATE OR DELETE ON client_forms
+      FOR EACH ROW EXECUTE FUNCTION desk_history('client_form')`,
+  ],
 ];
 
 // Brings the database up to the last step (or to `upTo`, for a test that
