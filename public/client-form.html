@@ -9,21 +9,104 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/styles.css">
+<script src="/client-form.js" defer></script>
 </head>
 <body>
 <!-- Served at /client-form (html_handling in wrangler.jsonc drops the .html).
-     Like every file in public/, it needs no desk key, so a client can open it. -->
+     The page itself needs no key, but everything it reads or sends goes
+     through /api/client-form, which does: the same login as the desk. -->
 <div class="wrap">
   <header class="top">
     <div>
       <p class="eyebrow">client form</p>
       <h1>Client form</h1>
     </div>
+    <p class="lede">A new client in one go: who they are, the people we deal with, their live website, the accounts it runs on, and the work each URL needs. Saving makes the client’s site on the desk with all of it.</p>
+    <p class="crosslink"><a class="addbtn ghost" href="/">Back to the desk</a></p>
   </header>
-  <div class="empty lost">
-    <p class="emptyp">The form is on its way.</p>
-    <a class="addbtn" href="/">Back to the desk</a>
-  </div>
+
+  <p class="sortnote" id="cf-note" role="status">Loading the form…</p>
+
+  <section class="gate" id="gate" hidden>
+    <form id="gateform">
+      <h3 class="emptyh">This form is private</h3>
+      <p class="emptyp" id="gatemsg">Enter the desk key to fill in a client form. This browser stays logged in until you log off on the desk.</p>
+      <div class="gaterow">
+        <label class="sr" for="gatekey">Desk key</label>
+        <input id="gatekey" type="password" autocomplete="current-password" required>
+        <button class="btn open" type="submit">Unlock</button>
+      </div>
+    </form>
+  </section>
+
+  <form id="cf" class="cf" novalidate hidden>
+    <section class="cfsec" aria-labelledby="cf-h-contact">
+      <h2 id="cf-h-contact">Contact information</h2>
+      <div class="edgrid">
+        <label class="field"><span>Name</span>
+          <input data-f="contact.name" maxlength="120" autocomplete="off" required></label>
+        <label class="field"><span>Email</span>
+          <input data-f="contact.email" type="email" maxlength="120" inputmode="email" autocomplete="off" spellcheck="false" required></label>
+        <label class="field"><span>Phone number</span>
+          <input data-f="contact.phone" type="tel" maxlength="40" inputmode="tel" autocomplete="off"></label>
+        <label class="field"><span>Business</span>
+          <input data-f="business" maxlength="120" autocomplete="off" required></label>
+      </div>
+    </section>
+
+    <section class="cfsec" aria-labelledby="cf-h-assoc">
+      <h2 id="cf-h-assoc">Associate information</h2>
+      <p class="sub">Other people at the client we deal with. Leave a row empty to skip it.</p>
+      <ol class="cfrows" id="cf-associates"></ol>
+      <button class="btn" type="button" data-add="associates">+ Add associate</button>
+    </section>
+
+    <section class="cfsec" aria-labelledby="cf-h-live">
+      <h2 id="cf-h-live">Live website URL</h2>
+      <label class="field"><span class="sr">Live website URL</span>
+        <input data-f="live_url" maxlength="300" placeholder="clientsite.com" inputmode="url" autocomplete="off" spellcheck="false"></label>
+    </section>
+
+    <div class="cfwarn" id="cf-exists" role="alert" hidden></div>
+
+    <section class="cfsec" aria-labelledby="cf-h-services">
+      <h2 id="cf-h-services">Services &amp; accounts</h2>
+      <p class="sub">Pick each account the site runs on. <strong>Never put a password here.</strong> Under login info, say where the login lives, such as “1Password → Acme → GoDaddy”.</p>
+      <ol class="cfrows" id="cf-services"></ol>
+      <button class="btn" type="button" data-add="services">+ Add service</button>
+    </section>
+
+    <section class="cfsec" aria-labelledby="cf-h-jobs">
+      <h2 id="cf-h-jobs">Job info</h2>
+      <p class="sub">One row per URL. Tick the work each one needs.</p>
+      <ol class="cfrows" id="cf-jobs"></ol>
+      <button class="btn" type="button" data-add="jobs">+ Add URL</button>
+    </section>
+
+    <section class="cfsec" aria-labelledby="cf-h-options">
+      <h2 id="cf-h-options">Options</h2>
+      <div class="cfticks" id="cf-options"></div>
+      <p class="sub cfsmall">Saved with the client. The desk does not send emails yet.</p>
+    </section>
+
+    <p class="ederr" id="cf-err" role="alert" hidden></p>
+    <div class="edbtns">
+      <button class="addbtn" type="submit" id="cf-save">Save client</button>
+    </div>
+  </form>
+
+  <section class="empty cfdone" id="cf-done" hidden tabindex="-1">
+    <h3 class="emptyh" id="cf-done-h">Saved</h3>
+    <p class="emptyp" id="cf-done-p"></p>
+    <p class="cfbtns">
+      <a class="addbtn" id="cf-open" href="/">Open it on the desk</a>
+      <button class="addbtn ghost" type="button" id="cf-again">Fill in another</button>
+    </p>
+  </section>
+
+  <footer>
+    The form saves to the desk’s own database, behind the desk key. Nothing here is indexed.
+  </footer>
 </div>
 </body>
 </html>

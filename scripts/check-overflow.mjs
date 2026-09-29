@@ -411,6 +411,12 @@ const DETAILS = {
     { hostname: 'img.' + GL_ZONE, role: 'image', dns_on_cloudflare: false, renews_on: dayFrom(12) },
     { hostname: 'old-client-domain.example', role: 'old' },
   ],
+  // The job list: a URL at the limit with every tick, and one with none.
+  jobs: [
+    { url: GL_MAIN + '/services/custom-millwork-and-renovations/kitchens/' + 'toronto-and-the-gta-'.repeat(8).slice(0, 90),
+      clone: true, database_b2: true, seo_ppc: true, live: true, notes: LONG_LINK },
+    { url: 'img.' + GL_ZONE },
+  ],
   // Social media: a handle at the limit, profile links that are one long
   // unbroken run, and every platform so the section shows them together.
   linkedin: [
@@ -424,6 +430,19 @@ const DETAILS = {
   tiktok: [{ url: 'https://www.tiktok.com/@supercalifragilistic.renovations.official' }],
 };
 const SOCIAL = ['tiktok', 'linkedin', 'facebook', 'x', 'instagram'];
+
+// A client from the client form, as long as the form lets it be, so its
+// row on the desk shows the Client form section too. And what the form's
+// states type in: the same shapes, one row of each kind more.
+const FORM_CLIENT = {
+  business: 'Konstantinopoulou-Vandenberghe-Supercalifragilistic-Glass-and-Mirror-Installations-Etobicoke-Ltd'.slice(0, 120),
+  live_url: 'www.konstantinopoulou-vandenberghe-glass-and-mirror.example.ca',
+  contact: { name: DETAILS.contacts[0].name, email: 'owner@konstantinopoulou-vandenberghe-glass-and-mirror.example.ca', phone: '+1 (416) 555-0199 ext. 12345' },
+  associates: [{ name: 'Bo Chan', email: LONG_EMAIL, phone: '416 555 0100', position: DETAILS.contacts[0].role.slice(0, 120) }],
+  services: [{ kind: 'godaddy', login: 'The client’s own GoDaddy login, kept in the agency vault under Konstantinopoulou' }],
+  jobs: [{ url: 'konstantinopoulou-vandenberghe-glass-and-mirror.example.ca/' + 'a'.repeat(200), clone: true, live: true }],
+  notify_rep: true, competitor_analysis: true,
+};
 
 async function seedDetails(base, siteId) {
   const made = {};
@@ -597,6 +616,33 @@ async function gotoDesk(page, base, withKey) {
   await page.reload();
   await page.evaluate(() => document.fonts.ready);
   await page.waitForFunction(() => !/Loading/.test(document.getElementById('note').textContent) || !document.getElementById('gate').hidden);
+}
+// The client form, logged in or not, once it has either drawn or asked for the key.
+async function gotoForm(page, base, withKey) {
+  await gotoDesk(page, base, withKey);
+  await page.goto(base + '/client-form');
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForSelector('#cf:not([hidden]), #gate:not([hidden])');
+}
+// Types FORM_CLIENT's shapes in, with a spare row of each kind and every tick on.
+async function fillForm(page) {
+  const c = FORM_CLIENT;
+  const put = (f, v) => page.fill(`[data-f="${f}"]`, v);
+  await put('contact.name', c.contact.name);
+  // Not the seeded client's own address and email, so the form is not
+  // taken for that client (the "already on the desk" state sets that up).
+  await put('contact.email', 'new-' + c.contact.email);
+  await put('contact.phone', c.contact.phone);
+  await put('live_url', c.live_url.replace('www.', 'www.new-'));
+  for (const kind of ['associates', 'services', 'jobs']) await page.click(`[data-add="${kind}"]`);
+  const a = c.associates[0];
+  for (const i of [0, 1]) {
+    for (const k of ['name', 'email', 'phone', 'position']) await put(`associates.${i}.${k}`, a[k]);
+    await page.selectOption(`[data-f="services.${i}.kind"]`, i ? 'backblaze_bucket' : 'godaddy');
+    await put(`services.${i}.login`, c.services[0].login);
+    await put(`jobs.${i}.url`, c.jobs[0].url);
+  }
+  for (const box of await page.locator('#cf input[type="checkbox"]').all()) await box.check();
 }
 const settle = (page) => page.waitForTimeout(450);   // the row's snap-scroll and the dock's slide
 // An opened row reads its services, contacts and domains; measure once they
@@ -844,6 +890,40 @@ function statesFor(base, sites, detailsTarget) {
   const siteNames = sites.map((s) => s.name);
   const S = [];
   S.push(['locked', async (p) => { await gotoDesk(p, base, false); await p.waitForSelector('#gate:not([hidden])'); }]);
+  S.push(['client form: locked', async (p) => { await gotoForm(p, base, false); await p.waitForSelector('#gate:not([hidden])'); }]);
+  S.push(['client form: empty', async (p) => { await gotoForm(p, base, true); await p.waitForSelector('#cf:not([hidden])'); }]);
+  S.push(['client form: filled', async (p) => {
+    await gotoForm(p, base, true);
+    await fillForm(p);
+    await p.fill('[data-f="business"]', 'A business not on the desk yet, with a name as long as the form allows it to be, 120 chars.');
+    await settle(p);
+  }]);
+  S.push(['client form: already on the desk', async (p) => {
+    await gotoForm(p, base, true);
+    await fillForm(p);
+    await p.fill('[data-f="business"]', LONGEST);
+    await p.waitForSelector('#cf-exists:not([hidden])');
+  }]);
+  // Refused by the Worker, so it writes nothing, on a deployed desk too.
+  S.push(['client form: an error', async (p) => {
+    await gotoForm(p, base, true);
+    await fillForm(p);
+    await p.fill('[data-f="business"]', 'A business not on the desk yet');
+    await p.fill('[data-f="services.1.login"]', 'password: ' + 'x'.repeat(100));
+    await p.click('#cf-save');
+    await p.waitForSelector('#cf-err:not([hidden])');
+  }]);
+  // The save is answered here, so nothing is written.
+  S.push(['client form: saved', async (p) => {
+    await gotoForm(p, base, true);
+    await p.route('**/api/client-form', (route) => (route.request().method() === 'POST'
+      ? route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ site: { id: '10000', name: FORM_CLIENT.business } }) })
+      : route.fallback()));
+    await fillForm(p);
+    await p.fill('[data-f="business"]', 'A business not on the desk yet');
+    await p.click('#cf-save');
+    await p.waitForSelector('#cf-done:not([hidden])');
+  }]);
   S.push(['404', async (p) => { await p.goto(base + '/no-such-page'); await p.evaluate(() => document.fonts.ready); }]);
   if (!siteNames.length) {
     S.push(['empty desk', async (p) => { await gotoDesk(p, base, true); await p.waitForSelector('.empty'); }]);
@@ -967,6 +1047,7 @@ try {
       const { site } = await api(base, 'POST', '/api/sites', s);
       if (s.name === LONGEST) await seedDetails(base, site.id);
     }
+    await api(base, 'POST', '/api/client-form', FORM_CLIENT);
   }
   const { sites } = await api(base, 'GET', '/api/sites');
   const detailsTarget = await pickDetailsTarget(base, sites);

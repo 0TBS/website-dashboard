@@ -1600,6 +1600,20 @@ window.desk = Object.freeze({
   api, Locked, lock, esc, copyBtn, openBtn, whenAt, fieldLabel, byId, PLATFORMS, FLAGS,
 });
 
+// A link to one site, /#site=<id> (the client form links here): once the
+// list has loaded, that row opens. Read once, then taken off the address.
+function siteFromUrl() {
+  const m = /^#site=([0-9]{4,12})$/.exec(location.hash);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  const s = byId(m[1]);
+  if (!s) { note.textContent = 'There is no site ' + m[1] + ' on the desk.'; return; }
+  if (!matches(s)) clearFilters(false);
+  renderGrid(s.id);
+  const card = grid.querySelector(`.site[data-id="${CSS.escape(s.id)}"]`);
+  if (card) { snapTo(card); card.querySelector('.nm').focus({ preventScroll: true }); paintDock(); }
+}
+
 // ---- loading ----
 async function load({ quiet = false } = {}) {
   if (!quiet) note.textContent = 'Loading the list…';
@@ -1613,6 +1627,7 @@ async function load({ quiet = false } = {}) {
     $('tools').hidden = false;
     $('logoff').hidden = false;
     if (first || changed) renderGrid();
+    siteFromUrl();
     glTakePending();
   } catch (e) {
     if (e instanceof Locked) { lock(e); return; }
