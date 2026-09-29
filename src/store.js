@@ -152,7 +152,7 @@ export class Store {
     const spec = ITEMS[kind];
     return this.#write(async (tx) => {
       if (!(await tx.row('SELECT id FROM sites WHERE id = ?', siteId))) return { missing: true };
-      if (kind === 'domains' && await sameHost(tx, siteId, fields.hostname)) return { duplicate: 'hostname' };
+      if (spec.unique && await taken(tx, spec, siteId, fields[spec.unique])) return { duplicate: spec.unique };
       const now = new Date().toISOString();
       const id = crypto.randomUUID();
       const columns = Object.keys(spec.fields);
@@ -175,8 +175,8 @@ export class Store {
       if (expected && current.updated_at !== expected) return { conflict: true, item: current };
       const keys = Object.keys(fields).filter((k) => k in spec.fields);
       if (!keys.length) return { item: current };
-      if (kind === 'domains' && 'hostname' in fields && fields.hostname !== current.hostname
-        && await sameHost(tx, siteId, fields.hostname)) return { duplicate: 'hostname' };
+      const u = spec.unique;
+      if (u && u in fields && fields[u] !== current[u] && await taken(tx, spec, siteId, fields[u])) return { duplicate: u };
       await tx.run(
         `UPDATE ${spec.table} SET ${keys.map((k) => k + ' = ?').join(', ')}, updated_at = ? WHERE id = ? AND site_id = ?`,
         ...keys.map((k) => fields[k]), new Date().toISOString(), itemId, siteId
@@ -241,5 +241,6 @@ async function readItem(tx, kind, siteId, id) {
   return row ? itemJson(kind, row) : null;
 }
 
-const sameHost = (tx, siteId, hostname) =>
-  tx.row('SELECT id FROM site_domains WHERE site_id = ? AND hostname = ?', siteId, hostname);
+// A domain, or a social media link, is listed once per site.
+const taken = (tx, spec, siteId, value) =>
+  tx.row(`SELECT id FROM ${spec.table} WHERE site_id = ? AND ${spec.unique} = ?`, siteId, value);

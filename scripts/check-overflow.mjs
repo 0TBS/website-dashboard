@@ -411,7 +411,19 @@ const DETAILS = {
     { hostname: 'img.' + GL_ZONE, role: 'image', dns_on_cloudflare: false, renews_on: dayFrom(12) },
     { hostname: 'old-client-domain.example', role: 'old' },
   ],
+  // Social media: a handle at the limit, profile links that are one long
+  // unbroken run, and every platform so the section shows them together.
+  linkedin: [
+    { url: 'https://www.linkedin.com/company/' + 'supercalifragilistic-renovations-and-millwork-'.repeat(5).slice(0, 220),
+      handle: 'supercalifragilistic_renovations_and_millwork_toronto_official_account_'.repeat(2).slice(0, 100),
+      account: LONG_EMAIL, notes: 'Posted to by the client twice a month. '.repeat(10).trim() },
+  ],
+  instagram: [{ url: 'https://instagram.com/supercalifragilistic.renovations', handle: 'supercalifragilistic.renovations' }],
+  facebook: [{ url: 'https://www.facebook.com/profile.php?id=100089123456789012345&sk=about_contact_and_basic_info' }],
+  x: [{ url: 'https://x.com/supercalifragil', handle: 'supercalifragil', account: 'The agency’s X login, in the shared vault' }],
+  tiktok: [{ url: 'https://www.tiktok.com/@supercalifragilistic.renovations.official' }],
 };
+const SOCIAL = ['tiktok', 'linkedin', 'facebook', 'x', 'instagram'];
 
 async function seedDetails(base, siteId) {
   const made = {};
@@ -424,6 +436,8 @@ async function seedDetails(base, siteId) {
   await api(base, 'PATCH', at('services', 0), { notes: DETAILS.services[0].notes, account: 'marketing@example.com' });
   await api(base, 'PATCH', at('contacts', 0), { email: 'x' + LONG_EMAIL.slice(1) });
   await api(base, 'PATCH', at('domains', 0), { registrar: 'Cloudflare', dns_on_cloudflare: false, renews_on: dayFrom(-39) });
+  await api(base, 'PATCH', at('linkedin', 0), { handle: 'acme', notes: 'Before: ' + DETAILS.linkedin[0].url });
+  await api(base, 'PATCH', at('linkedin', 0), { handle: DETAILS.linkedin[0].handle, notes: DETAILS.linkedin[0].notes });
   const gone = (await api(base, 'POST', `/api/sites/${siteId}/contacts`, { ...DETAILS.contacts[0], name: 'Z' + DETAILS.contacts[0].name.slice(1) })).item;
   await api(base, 'DELETE', `/api/sites/${siteId}/contacts/${gone.id}`);
 }
@@ -776,6 +790,21 @@ function detailsStates(base, target, details) {
     const item = fullest(details[kind]);
     if (item) S.push([`details: edit ${kind}`, (p) => dialog(p, 'edit', kind, item)]);
   }
+  // Social media is one section over five kinds: Add asks for the platform,
+  // and an item edits under its own.
+  S.push(['details: add social media', (p) => dialog(p, 'add', 'socials')]);
+  const social = SOCIAL.map((k) => [k, fullest(details[k])]).filter(([, it]) => it)
+    .sort(([, a], [, b]) => JSON.stringify(b).length - JSON.stringify(a).length)[0];
+  if (social) S.push([`details: edit ${social[0]}`, (p) => dialog(p, 'edit', social[0], social[1])]);
+  if (!LIVE) {
+    S.push(['details: add social media, wrong platform', async (p) => {
+      await dialog(p, 'add', 'socials');
+      await p.selectOption('#dtform select[name=platform]', 'tiktok');
+      await p.fill('#dtform input[name=url]', DETAILS.linkedin[0].url);
+      await p.click('#dt-save');
+      await p.waitForSelector('#dterr:not([hidden])');
+    }]);
+  }
   const service = fullest(details.services);
   const armed = fullest(details.domains) || service || fullest(details.contacts);
   if (armed) {
@@ -904,7 +933,7 @@ async function pickDetailsTarget(base, sites) {
   for (const site of sites) {
     let details;
     try { details = await api(base, 'GET', `/api/sites/${site.id}/details`); } catch { continue; }
-    const n = ['services', 'contacts', 'domains'].reduce((sum, k) => sum + (details[k] || []).length, 0);
+    const n = ['services', 'contacts', 'domains', ...SOCIAL].reduce((sum, k) => sum + (details[k] || []).length, 0);
     if (!best || n > best.n) best = { site, details, n };
   }
   return best;
