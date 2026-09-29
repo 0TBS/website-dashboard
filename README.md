@@ -56,7 +56,7 @@ A site's row can also **Go live**: point its live domain at its staging Worker. 
 | Part | Becomes |
 | --- | --- |
 | Contact information: name, email, phone number, business | The site (named after the business), and its first contact, with the role *Main contact*. Name, email and business are required. |
-| Associate information: name, email, phone number, job position | More contacts, the job position as their role. **+ Add associate** adds a row; an empty row is skipped. |
+| Delegate information: name, email, phone number, job position | More contacts, the job position as their role. **+ Add delegate** adds a row; an empty row is skipped. |
 | Live website URL | The site's live domain. |
 | Services & accounts: a service, and its login info | Services: GoDaddy, Cloudflare, Backblaze B2 and every other kind the desk knows. Login info goes in the service's Account and says where the login lives. A line that looks like a password (`password: …`, `pw=…`) is refused. |
 | Job info: a URL, with Clone, Database / Backblaze B2, SEO / PPC and Live ticks | The site's job list. **+ Add URL** adds a row. The first row takes the live website URL unless something else is typed there. Any URL ticked for SEO / PPC sets the site's SEO / PPC to *Needed*. |
@@ -312,7 +312,7 @@ Scripts send `Authorization: Bearer <DASH_KEY>` with every request. The page use
 
 | GET | `/api/client-form` | – | `{ choices }`: the service kinds, job ticks, options and row limits the form offers |
 | GET | `/api/client-form/check?business=&live_url=&email=` | – | `{ exists: null }`, or `{ exists: { error, code: "client-exists", field, site: { id, name } } }` |
-| POST | `/api/client-form` | the form (below) | `201 { site }`; `409 { code: "client-exists", field, site }`; `400 { error, field }`, the field named as a path such as `associates.1.email` or `jobs.0.url` |
+| POST | `/api/client-form` | the form (below) | `201 { site }`; `409 { code: "client-exists", field, site }`; `400 { error, field }`, the field named as a path such as `delegates.1.email` or `jobs.0.url` |
 
 `:kind` is `services`, `contacts`, `domains`, `jobs`, or one of the social media platforms: `tiktok`, `linkedin`, `facebook`, `x`, `instagram`.
 | GET | `/api/golive/signin?site=<id>` | – | Where Access sends you back after its login; needs no desk key. `302` to `/#golive=<id>` (`/` if the id is not a site id), or to `/#golive-error=<code>` |
@@ -334,7 +334,7 @@ Field values:
 - A contact: `name` (required), `role`, `email`, `phone` and `notes`.
 - A domain: `hostname` (required; a domain without a path, once per site), `role` (required; `live`, `staging`, `image`, `redirect`, `old` or `other`), `registrar`, `dns_on_cloudflare` (`true`, `false` or `null`), `renews_on` (`YYYY-MM-DD`) and `notes`.
 - A job: `url` (required; an address such as `acme.com/shop`, once per site), `clone`, `database_b2`, `seo_ppc` and `live` (`true`, `false` or `null`), and `notes`.
-- The client form: `business` (required), `live_url`, `contact: { name, email, phone }` (name and email required), `associates: [{ name, email, phone, position }]` (up to 20), `services: [{ kind, login }]` (up to 30), `jobs: [{ url, clone, database_b2, seo_ppc, live }]` (up to 50), and `notify_rep`, `notify_client`, `competitor_analysis` (`true` or `false`). Rows left empty are skipped.
+- The client form: `business` (required), `live_url`, `contact: { name, email, phone }` (name and email required), `delegates: [{ name, email, phone, position }]` (up to 20), `services: [{ kind, login }]` (up to 30), `jobs: [{ url, clone, database_b2, seo_ppc, live }]` (up to 50), and `notify_rep`, `notify_client`, `competitor_analysis` (`true` or `false`). Rows left empty are skipped.
 - A social media link (`tiktok`, `linkedin`, `facebook`, `x` or `instagram`): `url` (required; on that platform's own domain, such as `tiktok.com`, or `x.com` or `twitter.com` for X; stored as https; once per site), `handle` (one word, the `@` is dropped), `account` and `notes`.
 - Bad input returns `400 { error, field }`, naming the field that failed.
 - If the database cannot be reached, every request that needs it answers `503 { code: "database-unavailable" }`. After five minutes with no visits, Neon's free plan pauses the database. The next request wakes it, which takes up to a second or two.

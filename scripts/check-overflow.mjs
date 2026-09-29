@@ -438,7 +438,7 @@ const FORM_CLIENT = {
   business: 'Konstantinopoulou-Vandenberghe-Supercalifragilistic-Glass-and-Mirror-Installations-Etobicoke-Ltd'.slice(0, 120),
   live_url: 'www.konstantinopoulou-vandenberghe-glass-and-mirror.example.ca',
   contact: { name: DETAILS.contacts[0].name, email: 'owner@konstantinopoulou-vandenberghe-glass-and-mirror.example.ca', phone: '+1 (416) 555-0199 ext. 12345' },
-  associates: [{ name: 'Bo Chan', email: LONG_EMAIL, phone: '416 555 0100', position: DETAILS.contacts[0].role.slice(0, 120) }],
+  delegates: [{ name: 'Bo Chan', email: LONG_EMAIL, phone: '416 555 0100', position: DETAILS.contacts[0].role.slice(0, 120) }],
   services: [{ kind: 'godaddy', login: 'The client’s own GoDaddy login, kept in the agency vault under Konstantinopoulou' }],
   jobs: [{ url: 'konstantinopoulou-vandenberghe-glass-and-mirror.example.ca/' + 'a'.repeat(200), clone: true, live: true }],
   notify_rep: true, competitor_analysis: true,
@@ -634,10 +634,10 @@ async function fillForm(page) {
   await put('contact.email', 'new-' + c.contact.email);
   await put('contact.phone', c.contact.phone);
   await put('live_url', c.live_url.replace('www.', 'www.new-'));
-  for (const kind of ['associates', 'services', 'jobs']) await page.click(`[data-add="${kind}"]`);
-  const a = c.associates[0];
+  for (const kind of ['delegates', 'services', 'jobs']) await page.click(`[data-add="${kind}"]`);
+  const a = c.delegates[0];
   for (const i of [0, 1]) {
-    for (const k of ['name', 'email', 'phone', 'position']) await put(`associates.${i}.${k}`, a[k]);
+    for (const k of ['name', 'email', 'phone', 'position']) await put(`delegates.${i}.${k}`, a[k]);
     await page.selectOption(`[data-f="services.${i}.kind"]`, i ? 'backblaze_bucket' : 'godaddy');
     await put(`services.${i}.login`, c.services[0].login);
     await put(`jobs.${i}.url`, c.jobs[0].url);

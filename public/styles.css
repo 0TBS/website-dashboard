@@ -482,7 +482,7 @@ a.addbtn{display:inline-block;text-decoration:none}
 .editor .dthint{margin:-4px 0 0}
 
 /* ---- the client form (client-form.html) ----
-   Every box is a .field, as in the dialogs. Rows that repeat (associates,
+   Every box is a .field, as in the dialogs. Rows that repeat (delegates,
    services, URLs) are ruled blocks, each with its number and Remove. */
 .cf{display:grid;grid-template-columns:minmax(0,1fr);gap:26px;margin-top:22px}
 .cfsec{min-width:0;display:grid;grid-template-columns:minmax(0,1fr);gap:10px}

@@ -1,11 +1,11 @@
 // The client form (public/client-form.html): one submission that makes a new
-// site with its contact, associates, service accounts and job list, all at
+// site with its contact, delegates, service accounts and job list, all at
 // once. This is the one place that says what the form may hold; each part is
 // cleaned by the same rules the desk uses for it (sites.js, details.js), so a
 // contact from the form is the same as a contact added on the desk.
 //
 // Errors name the form's own field, as a path: `business`, `live_url`,
-// `contact.email`, `associates.1.position`, `services.0.kind`, `jobs.2.url`,
+// `contact.email`, `delegates.1.position`, `services.0.kind`, `jobs.2.url`,
 // so the page can mark the box that is wrong.
 //
 // Never a password, here as anywhere on the desk: "login info" says where the
@@ -22,9 +22,9 @@ export const OPTIONS = [
   ['competitor_analysis', 'Competitor analysis'],
 ];
 
-export const LIMITS = { associates: 20, services: 30, jobs: 50 };
+export const LIMITS = { delegates: 20, services: 30, jobs: 50 };
 
-// The main contact's role on the desk, beside the associates' job positions.
+// The main contact's role on the desk, beside the delegates' job positions.
 export const MAIN_CONTACT = 'Main contact';
 
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -76,10 +76,10 @@ export function cleanClientForm(input) {
   if (!contact.email) throw new InvalidField('contact.email', 'Contact: Email is required.');
   contact.role = MAIN_CONTACT;
 
-  const associates = [];
-  list(input, 'associates', 'Associates').forEach((a, i) => {
+  const delegates = [];
+  list(input, 'delegates', 'Delegates').forEach((a, i) => {
     if (['name', 'email', 'phone', 'position'].every((k) => blank(a[k]))) return;
-    associates.push(part(`associates.${i}.`, `Associate ${i + 1}`, { role: 'position' }, () =>
+    delegates.push(part(`delegates.${i}.`, `Delegate ${i + 1}`, { role: 'position' }, () =>
       cleanItem('contacts', { name: a.name, email: a.email, phone: a.phone, role: a.position }, { creating: true })));
   });
 
@@ -111,7 +111,7 @@ export function cleanClientForm(input) {
   // A job that needs SEO / PPC answers the site's own question.
   if (jobs.some((j) => j.seo_ppc === 1)) site.needs_seo_ppc = 1;
 
-  return { site, contacts: [contact, ...associates], services, jobs, options };
+  return { site, contacts: [contact, ...delegates], services, jobs, options };
 }
 
 // What the duplicate check compares: the live site's host without its
