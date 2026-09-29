@@ -3,6 +3,9 @@
 DASH_KEY=local-dev-key
 # wrangler dev is plain HTTP; the live desk refuses HTTP unless this is off.
 HTTPS_ONLY=off
+# A local Postgres of your own (`createdb desk_dev`). Never the live Neon
+# database: local runs would write to the real list.
+DATABASE_URL=postgres://localhost/desk_dev
 
 # Going live from the desk (README, "Going live from the desk"). Without all
 # five, /api/golive/* answers 503 golive-not-set-up and the rest of the desk

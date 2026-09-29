@@ -12,42 +12,9 @@ export const FLAGS = ['astro_staging', 'domain_ours', 'needs_seo_ppc'];
 const TEXT_LIMITS = { name: 120, environment: 80, notes: 2000 };
 const ADDRESS_LIMIT = 300;
 
-// Every field a person sets, in the order the table holds them.
+// Every field a person sets, in the order the table holds them (schema.js).
 export const COLUMNS = ['name', 'live_domain', 'staging_domain', 'github_repo', 'chat_url', 'environment',
   'live_platform', ...FLAGS, 'notes'];
-
-// Made when the object first starts rather than by a migration step, so a
-// fresh deploy works with nothing to run by hand.
-const SCHEMA = `CREATE TABLE IF NOT EXISTS sites (
-  id             TEXT PRIMARY KEY,
-  name           TEXT NOT NULL,
-  live_domain    TEXT,
-  staging_domain TEXT,
-  github_repo    TEXT,
-  chat_url       TEXT,
-  environment    TEXT,
-  live_platform  TEXT CHECK (live_platform IN ('astro','wordpress','other','none')),
-  astro_staging  INTEGER CHECK (astro_staging IN (0,1)),
-  domain_ours    INTEGER CHECK (domain_ours IN (0,1)),
-  needs_seo_ppc  INTEGER CHECK (needs_seo_ppc IN (0,1)),
-  notes          TEXT,
-  created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL
-)`;
-
-// Columns that came after the live table was first made. SQLite adds a
-// column in place and keeps every row, so an existing desk picks them up the
-// next time it starts; once they are there this does nothing.
-const ADDED = { chat_url: 'TEXT', environment: 'TEXT' };
-
-// `sql` is the Durable Object's ctx.storage.sql, or anything shaped like it.
-export function ensureSitesSchema(sql) {
-  sql.exec(SCHEMA);
-  const have = new Set(sql.exec('PRAGMA table_info(sites)').toArray().map((c) => c.name));
-  for (const [name, type] of Object.entries(ADDED)) {
-    if (!have.has(name)) sql.exec(`ALTER TABLE sites ADD COLUMN ${name} ${type}`);
-  }
-}
 
 export class InvalidField extends Error {
   constructor(field, message) {
@@ -114,14 +81,14 @@ export function normalizeChatUrl(raw) {
   return out;
 }
 
-function normalizeFlag(raw) {
+export function normalizeFlag(raw) {
   if (raw === null || raw === '' || raw === undefined) return null;
   if (raw === true || raw === 1 || raw === '1' || raw === 'true' || raw === 'yes') return 1;
   if (raw === false || raw === 0 || raw === '0' || raw === 'false' || raw === 'no') return 0;
   throw new Error('must be yes, no or not set');
 }
 
-function normalizeText(raw, limit) {
+export function normalizeText(raw, limit) {
   if (raw == null) return null;
   const s = String(raw).replace(/\r\n/g, '\n').trim();
   if (!s) return null;

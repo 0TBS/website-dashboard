@@ -10,7 +10,11 @@
     "check": "npm test && npm run check:overflow"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "playwright": "1.56.1",
     "wrangler": "4.138.0"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
   }
 }

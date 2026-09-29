@@ -3,126 +3,60 @@
 // the page itself is then served from public/ by the assets binding, and the
 // Worker answers /api/* itself.
 //
-// The list lives in one Durable Object with its own SQLite database, not in
-// D1: the account is at the Workers Free plan's limit of ten D1 databases,
-// every one of them holding a client site's forms or blog. A single object is
-// also the simplest thing that is strongly consistent — every read and write
-// goes through the same instance, one at a time. On top of that, an edit can
-// name the updated_at it started from, and is refused if the row has moved on
-// since, so a stale edit cannot overwrite a teammate's newer one.
+// The list, and everything else the desk knows, lives in Postgres on Neon
+// (db.js, schema.js, store.js). It used to live in a Durable Object; the
+// object is kept only so its rows can be copied across once, the first time
+// this Worker reaches the database (ready(), below).
 //
-// Going live from the desk (golive-routes.js) keeps its record in the same
-// object, in tables of its own (golive-store.js).
+// An edit can name the updated_at it started from, and is refused if the row
+// has moved on since, so a stale edit cannot overwrite a teammate's newer one.
 
 import { DurableObject } from 'cloudflare:workers';
-import { cleanSite, toJson, InvalidField, COLUMNS, ensureSitesSchema } from './sites.js';
+import { cleanSite, InvalidField } from './sites.js';
+import { cleanItem, KINDS, CHOICES } from './details.js';
 import { sessionToken, cookieValues, sessionCookie, clearCookie } from './session.js';
 import { json } from './answers.js';
-import * as golive from './golive-store.js';
+import { pgSession } from './db.js';
+import { migrate } from './schema.js';
+import { Store } from './store.js';
 import { handleGoLive, handleGoLiveSignin } from './golive-routes.js';
 
-// The table's shape lives in sites.js with the rest of what a site is.
-// Fields reaching these methods have already been through cleanSite() in the
-// Worker, so the object only stores and reads. Not found is null, not an
-// error: errors lose their class crossing the RPC boundary.
+// The old home of the list. It no longer takes writes: all it does is hand
+// over its tables, once, for the copy into Postgres. Its data stays where it
+// was, untouched, until the object is deleted in a later release.
 export class Desk extends DurableObject {
-  constructor(ctx, env) {
-    super(ctx, env);
-    this.sql = ctx.storage.sql;
-    ensureSitesSchema(this.sql);
-    golive.ensureGoliveSchema(this.sql);
-  }
-
-  // Each site carries where its go-live stands (null when it never went
-  // live from the desk), so the list can show it without asking again.
-  list() {
-    const summaries = golive.goliveSummaries(this.sql);
-    return this.sql.exec('SELECT * FROM sites ORDER BY name COLLATE NOCASE').toArray()
-      .map((row) => ({ ...toJson(row), golive: summaries.get(row.id) ?? null }));
-  }
-
-  read(id) {
-    return golive.siteWithGolive(this.sql, id);
-  }
-
-  create(fields) {
-    const now = new Date().toISOString();
-    const id = crypto.randomUUID();
-    const values = COLUMNS.map((c) => (c in fields ? fields[c] : null));
-    this.sql.exec(
-      `INSERT INTO sites (id, ${COLUMNS.join(', ')}, created_at, updated_at)
-       VALUES (?, ${COLUMNS.map(() => '?').join(', ')}, ?, ?)`,
-      id, ...values, now, now
-    );
-    return this.read(id);
-  }
-
-  // Returns { site }, { missing: true }, or { conflict: true, site } when
-  // `expected` (the updated_at the editor started from) is no longer current.
-  // The read and the write run in one synchronous call, so nothing can land
-  // between the check and the update.
-  update(id, fields, expected) {
-    const current = this.read(id);
-    if (!current) return { missing: true };
-    if (expected && current.updated_at !== expected) return { conflict: true, site: current };
-    const keys = Object.keys(fields).filter((k) => COLUMNS.includes(k));
-    if (!keys.length) return { site: current };
-    this.sql.exec(
-      `UPDATE sites SET ${keys.map((k) => k + ' = ?').join(', ')}, updated_at = ? WHERE id = ?`,
-      ...keys.map((k) => fields[k]), new Date().toISOString(), id
-    );
-    return { site: this.read(id) };
-  }
-
-  // Returns true, false (no such site) or { blocked: 'golive-active' }: a site
-  // whose go-live still needs a person (running, being checked, or failed and
-  // not put back) stays, or nobody could finish it from the desk. Its go-live
-  // row and log stay in the database either way.
-  remove(id) {
-    if (!this.read(id)) return false;
-    if (golive.goliveBlocksDelete(this.sql, id)) return { blocked: 'golive-active' };
-    this.sql.exec('DELETE FROM sites WHERE id = ?', id);
-    return true;
-  }
-
-  // Going live: the store's functions, called from golive-routes.js. The
-  // Worker passes its own clock (`now`) in the options. Each write runs in
-  // one transaction, so a step that fails part-way leaves nothing of itself.
-  goliveDetail(siteId, now) {
-    return golive.goliveDetail(this.sql, siteId, now);
-  }
-
-  goliveLastCheck(siteId) {
-    return golive.goliveLastCheck(this.sql, siteId);
-  }
-
-  goliveHostsInUse(siteId, hosts) {
-    return golive.goliveHostsInUse(this.sql, siteId, hosts);
-  }
-
-  goliveSaveCheck(siteId, check) {
-    return this.ctx.storage.transactionSync(() => golive.goliveSaveCheck(this.sql, siteId, check));
-  }
-
-  goliveBegin(siteId, run) {
-    return this.ctx.storage.transactionSync(() => golive.goliveBegin(this.sql, siteId, run));
-  }
-
-  goliveStep(siteId, token, step) {
-    return this.ctx.storage.transactionSync(() => golive.goliveStep(this.sql, siteId, token, step));
-  }
-
-  goliveFinish(siteId, token, end) {
-    return this.ctx.storage.transactionSync(() => golive.goliveFinish(this.sql, siteId, token, end));
-  }
-
-  goliveSaveVerify(siteId, result) {
-    return this.ctx.storage.transactionSync(() => golive.goliveSaveVerify(this.sql, siteId, result));
+  export() {
+    const sql = this.ctx.storage.sql;
+    const have = new Set(sql.exec("SELECT name FROM sqlite_master WHERE type = 'table'").toArray().map((t) => t.name));
+    const dump = {};
+    for (const table of ['sites', 'golive', 'golive_log', 'golive_checks']) {
+      dump[table] = have.has(table) ? sql.exec(`SELECT * FROM ${table}`).toArray() : [];
+    }
+    return dump;
   }
 }
 
 // The one instance, placed in eastern North America, near the team.
-const desk = (env) => env.DESK.get(env.DESK.idFromName('desk'), { locationHint: 'enam' });
+const oldDesk = (env) => env.DESK.get(env.DESK.idFromName('desk'), { locationHint: 'enam' });
+
+// Once per Worker instance: bring the database's shape up to date, then copy
+// the Durable Object's rows across if that has not been done. Until both
+// have worked, every request that needs the database fails, rather than
+// showing an empty list someone might start filling in again. Only the fact
+// that it is done is kept between requests: a request may not wait on
+// another request's connection, so two that start together both check, and
+// the lock in migrate() and importRows() makes the second find nothing to do.
+let isReady = false;
+async function ready(env, connect) {
+  if (isReady) return;
+  await migrate(connect);
+  const s = new Store(connect);
+  if (!(await s.hasImported())) {
+    const counts = await s.importRows(env.DESK ? await oldDesk(env).export() : {});
+    if (counts) console.log(JSON.stringify({ message: 'Copied the Durable Object into Postgres.', counts }));
+  }
+  isReady = true;
+}
 
 // The zone's own "Always Use HTTPS" is off, and turning it on would change
 // every *.10xid.com client host, so this host enforces HTTPS itself. On unless
@@ -219,37 +153,81 @@ async function handleApi(request, env, url, ctx) {
     return json({ error: 'Changes must come from the desk page itself.', code: 'not-from-desk' }, 403);
   }
 
-  // Going live needs the key and, on top of it, the person's own Access
-  // login, which golive-routes.js checks. A switch or rollback is handed to
-  // waitUntil, so it runs to its end even if the page goes away.
-  const res = parts[2] === 'golive'
-    ? await handleGoLive(request, env, { parts, url, store: desk(env), waitUntil: (p) => ctx.waitUntil(p) })
-    : await handleSites(request, env, parts);
-  // Each visit restarts the cookie's 400 days, so an active browser never expires.
-  if (cred === 'cookie') res.headers.append('set-cookie', sessionCookie(await sessionToken(env.DASH_KEY), secure));
-  return res;
+  // Nothing below runs until the database is ready, and only for a request
+  // that holds the key. The request's one connection closes once the answer
+  // and anything handed to waitUntil have finished.
+  if (!env.DATABASE_URL) return unavailable('DATABASE_URL is not set on this Worker.');
+  const session = pgSession(env.DATABASE_URL);
+  const pending = [];
+  const waitUntil = (p) => { pending.push(p); ctx.waitUntil(p); };
+  try {
+    try {
+      await ready(env, session.connect);
+    } catch (e) {
+      return unavailable(e);
+    }
+
+    // Going live needs the key and, on top of it, the person's own Access
+    // login, which golive-routes.js checks. A switch or rollback is handed to
+    // waitUntil, so it runs to its end even if the page goes away.
+    const store = new Store(session.connect);
+    const res = parts[2] === 'golive'
+      ? await handleGoLive(request, env, { parts, url, store, waitUntil })
+      : await handleSites(request, store, parts);
+    // Each visit restarts the cookie's 400 days, so an active browser never expires.
+    if (cred === 'cookie') res.headers.append('set-cookie', sessionCookie(await sessionToken(env.DASH_KEY), secure));
+    return res;
+  } finally {
+    ctx.waitUntil(Promise.allSettled(pending).then(() => session.close()));
+  }
 }
 
-async function handleSites(request, env, parts) {
-  if (parts[2] !== 'sites' || parts.length > 4) return json({ error: 'Not found.' }, 404);
-  const id = parts[3];
+function unavailable(e) {
+  console.error(JSON.stringify({ message: 'The database is not ready.', error: String(e?.message || e) }));
+  return json({ error: 'The desk could not reach its database. Try again in a moment.', code: 'database-unavailable' }, 503);
+}
+
+// Ids as crypto.randomUUID() makes them. Anything else is not one of ours.
+const ID = /^[0-9a-f-]{36}$/;
+
+// The updated_at an editor started from, when it sends one.
+function expectedFrom(body) {
+  const expected = body.expected_updated_at;
+  if (expected != null && (typeof expected !== 'string' || expected.length > 40)) {
+    throw new InvalidField('expected_updated_at', 'expected_updated_at must be the updated_at string you last saw.');
+  }
+  return expected || null;
+}
+
+// /api/sites and /api/sites/:id, then a site's details:
+//   GET    /api/sites/:id/details        services, contacts, domains and history
+//   POST   /api/sites/:id/:kind          add a service, contact or domain
+//   PATCH  /api/sites/:id/:kind/:itemId  change one
+//   DELETE /api/sites/:id/:kind/:itemId  remove one
+async function handleSites(request, db, parts) {
+  if (parts[2] !== 'sites' || parts.length > 6) return json({ error: 'Not found.' }, 404);
+  const [id, kind, itemId] = parts.slice(3);
+  if (id && !ID.test(id)) return notFound();
   const m = request.method;
 
   try {
-    if (!id && m === 'GET') return json({ sites: await desk(env).list() });
+    if (kind === 'details' && !itemId) {
+      if (m !== 'GET') return json({ error: 'Method not allowed.' }, 405);
+      const details = await db.details(id);
+      return details ? json({ ...details, choices: CHOICES }) : notFound();
+    }
+    if (kind) return await handleItem(request, db, m, id, kind, itemId);
+
+    if (!id && m === 'GET') return json({ sites: await db.list() });
     if (!id && m === 'POST') {
       const fields = cleanSite(await readBody(request), { creating: true });
-      return json({ site: await desk(env).create(fields) }, 201);
+      return json({ site: await db.create(fields) }, 201);
     }
     if (id && m === 'PATCH') {
       const body = await readBody(request);
       const fields = cleanSite(body);
       if (!Object.keys(fields).length) throw new InvalidField(null, 'Nothing to change.');
-      const expected = body.expected_updated_at;
-      if (expected != null && (typeof expected !== 'string' || expected.length > 40)) {
-        throw new InvalidField('expected_updated_at', 'expected_updated_at must be the updated_at string you last saw.');
-      }
-      const res = await desk(env).update(id, fields, expected || null);
+      const res = await db.update(id, fields, expectedFrom(body));
       if (res.missing) return notFound();
       if (res.conflict) {
         return json({ error: 'Someone else changed this site while you were editing it.', code: 'conflict', site: res.site }, 409);
@@ -257,7 +235,7 @@ async function handleSites(request, env, parts) {
       return json({ site: res.site });
     }
     if (id && m === 'DELETE') {
-      const removed = await desk(env).remove(id);
+      const removed = await db.remove(id);
       if (removed?.blocked) {
         return json({
           error: 'This site has a go-live that is not finished. Roll it back, or wait for it to finish, before deleting it.',
@@ -271,6 +249,36 @@ async function handleSites(request, env, parts) {
     if (e instanceof InvalidField) return json({ error: e.message, field: e.field }, 400);
     throw e;
   }
+}
+
+const DUPLICATE = { hostname: 'That domain is already listed for this site.' };
+
+async function handleItem(request, db, m, siteId, kind, itemId) {
+  if (!KINDS.includes(kind) || (itemId && !ID.test(itemId))) return json({ error: 'Not found.' }, 404);
+  const gone = () => json({ error: 'No such ' + kind.replace(/s$/, '') + ' on this site.' }, 404);
+
+  if (!itemId && m === 'POST') {
+    const res = await db.createItem(kind, siteId, cleanItem(kind, await readBody(request), { creating: true }));
+    if (res.missing) return notFound();
+    if (res.duplicate) throw new InvalidField(res.duplicate, DUPLICATE[res.duplicate]);
+    return json({ item: res.item }, 201);
+  }
+  if (itemId && m === 'PATCH') {
+    const body = await readBody(request);
+    const fields = cleanItem(kind, body);
+    if (!Object.keys(fields).length) throw new InvalidField(null, 'Nothing to change.');
+    const res = await db.updateItem(kind, siteId, itemId, fields, expectedFrom(body));
+    if (res.missing) return gone();
+    if (res.duplicate) throw new InvalidField(res.duplicate, DUPLICATE[res.duplicate]);
+    if (res.conflict) {
+      return json({ error: 'Someone else changed this while you were editing it.', code: 'conflict', item: res.item }, 409);
+    }
+    return json({ item: res.item });
+  }
+  if (itemId && m === 'DELETE') {
+    return (await db.removeItem(kind, siteId, itemId)) ? json({ deleted: itemId }) : gone();
+  }
+  return json({ error: 'Method not allowed.' }, 405);
 }
 
 export default {

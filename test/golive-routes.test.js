@@ -1,7 +1,8 @@
-import { test, beforeEach, mock } from 'node:test';
+import { test, beforeEach, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { sqliteStorage } from './sqlite-adapter.js';
-import * as store from '../src/golive-store.js';
+import { freshDatabase } from './pglite.js';
+import { transaction } from '../src/db.js';
+import { Store } from '../src/store.js';
 import { handleGoLive, handleGoLiveSignin, goliveConfigMissing } from '../src/golive-routes.js';
 import { _resetKeyCache } from '../src/access.js';
 import { cloudflare } from '../src/cloudflare.js';
@@ -69,23 +70,6 @@ const RECORDS = [
   { type: 'TXT', name: 'acme.com', content: 'v=spf1 include:_spf.mailhost.net ~all' },
 ];
 
-// A copy of the sites table in src/worker.js, which cannot be imported under
-// plain Node (it imports cloudflare:workers). Keep the two in step.
-const SITES = `CREATE TABLE IF NOT EXISTS sites (
-  id             TEXT PRIMARY KEY,
-  name           TEXT NOT NULL,
-  live_domain    TEXT,
-  staging_domain TEXT,
-  github_repo    TEXT,
-  live_platform  TEXT CHECK (live_platform IN ('astro','wordpress','other','none')),
-  astro_staging  INTEGER CHECK (astro_staging IN (0,1)),
-  domain_ours    INTEGER CHECK (domain_ours IN (0,1)),
-  needs_seo_ppc  INTEGER CHECK (needs_seo_ppc IN (0,1)),
-  notes          TEXT,
-  created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL
-)`;
-
 // --- A real Access login: an RS256 key pair and a certs endpoint ---
 
 const enc = new TextEncoder();
@@ -135,39 +119,56 @@ function liveSite(fake, url) {
   return { status: 404, body: 'Not found' };
 }
 
-// The Desk's go-live methods as worker.js defines them, over node:sqlite:
-// every write in one transaction, and everything copied on the way in and
-// out, as an RPC call copies it. The object's clock is the file's clock.
-function deskOf({ sql, transactionSync }) {
-  const rpc = (fn, write = false) => async (...args) => {
-    const copy = structuredClone(args);
-    return structuredClone(write ? transactionSync(() => fn(sql, ...copy)) : fn(sql, ...copy));
+// One database for the whole file, emptied for each world: a fresh PGlite
+// takes seconds to start. Only the newest world may use it; an older one
+// throws rather than quietly read the newer one's rows.
+const shared = await freshDatabase();
+let newest = null;
+
+// PGlite keeps the process alive until it is closed.
+after(() => shared.db.close());
+
+const TABLES = 'sites, golive, golive_log, golive_checks, site_services, site_contacts, site_domains, history, desk_meta';
+
+async function database() {
+  await transaction(shared.connect, (tx) => tx.run(`TRUNCATE ${TABLES} RESTART IDENTITY CASCADE`), { write: true });
+  const db = {
+    connect: () => {
+      if (newest !== db) throw new Error('This world\'s database was emptied for a newer one.');
+      return shared.connect();
+    },
   };
-  return {
-    read: rpc((db, id) => store.siteWithGolive(db, id, clock.t)),
-    goliveDetail: rpc(store.goliveDetail),
-    goliveLastCheck: rpc(store.goliveLastCheck),
-    goliveHostsInUse: rpc(store.goliveHostsInUse),
-    goliveSaveCheck: rpc(store.goliveSaveCheck, true),
-    goliveBegin: rpc(store.goliveBegin, true),
-    goliveStep: rpc(store.goliveStep, true),
-    goliveFinish: rpc(store.goliveFinish, true),
-    goliveSaveVerify: rpc(store.goliveSaveVerify, true),
-  };
+  newest = db;
+  return db;
 }
 
-function addSite(sql, s) {
-  sql.exec(
+// A change made in the database behind the store's back, in a transaction
+// of its own.
+const exec = (w, text, ...params) => transaction(w.db.connect, (tx) => tx.run(text, ...params), { write: true });
+
+// The go-live methods of store.js, as worker.js hands them to the routes. Each
+// is bound, so a test can keep one aside and call it from its own stand-in.
+function deskOf(store) {
+  const desk = {};
+  for (const name of ['read', 'goliveDetail', 'goliveLastCheck', 'goliveHostsInUse', 'goliveSaveCheck', 'goliveBegin',
+    'goliveStep', 'goliveFinish', 'goliveSaveVerify']) {
+    desk[name] = store[name].bind(store);
+  }
+  return desk;
+}
+
+function addSite(db, s) {
+  return transaction(db.connect, (tx) => tx.run(
     `INSERT INTO sites (id, name, live_domain, staging_domain, github_repo, live_platform, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     s.id, s.name, s.live_domain ?? null, s.staging_domain ?? null, s.github_repo ?? null, s.live_platform ?? null, CREATED, CREATED
-  );
+  ), { write: true });
 }
 
 // Cloudflare, the sites, both public resolvers and the Access certs behind
 // one fetch, and the desk's database. `wrap` puts something in front of
 // Cloudflare alone.
-function world({ records = RECORDS, sites = [SITE], wrap = null } = {}) {
+async function world({ records = RECORDS, sites = [SITE], wrap = null } = {}) {
   const fake = createFakeCloudflare({
     accountId: ACCOUNT,
     zones: [{ id: ZONE, name: 'acme.com' }, { id: DESK_ZONE, name: '10xid.com' }],
@@ -187,13 +188,12 @@ function world({ records = RECORDS, sites = [SITE], wrap = null } = {}) {
   const certs = async () => Response.json({ keys: [JWK], public_cert: {}, public_certs: [] });
   const net = combineFetches(wrap ? [fake.claims, wrap(fake.fetch)] : fake, web, resolvers, [TEAM, certs]);
 
-  const storage = sqliteStorage();
-  storage.sql.exec(SITES);
-  store.ensureGoliveSchema(storage.sql);
-  for (const s of sites) addSite(storage.sql, s);
+  const db = await database();
+  for (const s of sites) await addSite(db, s);
+  const store = new Store(db.connect);
   // Changes a person makes in the dashboard behind the desk's back.
   const admin = cloudflare({ token: 'tok-admin', accountId: ACCOUNT, fetchImpl: fake.fetch });
-  return { fake, web, resolvers, net, storage, desk: deskOf(storage), admin };
+  return { fake, web, resolvers, net, db, store, desk: deskOf(store), admin };
 }
 
 // One request to /api/golive/*, as worker.js hands it over once the desk key
@@ -247,7 +247,7 @@ const isAttach = (c) => c.method === 'PUT' && c.path.endsWith('/workers/domains'
 const isDetach = (c) => c.method === 'DELETE' && c.path.includes('/workers/domains/');
 const isCreate = (c) => c.method === 'POST' && c.path.endsWith('/dns_records');
 const actions = (log) => log.map((x) => x.action);
-const rowOf = (w, id = SITE_ID) => store.goliveDetail(w.storage.sql, id, clock.t).golive;
+const rowOf = async (w, id = SITE_ID) => (await w.store.goliveDetail(id, clock.t)).golive;
 
 // Answers `hostname`'s attach with an error, and leaves every other call alone.
 const failAttach = (hostname, status, code, message) => (fetchImpl) => async (input, init = {}) => {
@@ -265,7 +265,7 @@ beforeEach(() => {
 // --- Set up, and who is asking ---
 
 test('with a setting missing, every endpoint answers 503 with the names, before anything is fetched', async () => {
-  const w = world();
+  const w = await world();
   const cases = [
     [{}, ['GOLIVE_API_TOKEN', 'GOLIVE_ACCOUNT_ID', 'ACCESS_TEAM_DOMAIN', 'ACCESS_AUD', 'GOLIVE_EMAILS']],
     [{ ...ENV, GOLIVE_API_TOKEN: '  ' }, ['GOLIVE_API_TOKEN']],
@@ -289,7 +289,7 @@ test('with a setting missing, every endpoint answers 503 with the names, before 
 });
 
 test('Access: no token is 401, a forged or expired one 403, and someone not on the list is named', async () => {
-  const w = world();
+  const w = await world();
   const none = await call(w, 'GET', '/api/golive/me', { token: null });
   assert.equal(none.status, 401);
   assert.equal(none.body.code, 'access-not-protecting');
@@ -305,12 +305,12 @@ test('Access: no token is 401, a forged or expired one 403, and someone not on t
   assert.deepEqual(eve.body, {
     code: 'not-allowed', error: 'eve@example.com is not on the list of people who can go live.', email: 'eve@example.com',
   });
-  assert.equal(store.goliveLastCheck(w.storage.sql, SITE_ID), null, 'a refused person checks nothing');
+  assert.equal(await w.store.goliveLastCheck(SITE_ID), null, 'a refused person checks nothing');
   assert.equal(w.fake.calls.length, 0, 'and Cloudflare was never asked');
 });
 
 test('GET /api/golive/me names the person; the Access keys come out of the same budget', async () => {
-  const w = world();
+  const w = await world();
   const first = await call(w, 'GET', '/api/golive/me');
   assert.deepEqual([first.status, first.body], [200, { email: ANA }]);
   assert.equal(first.calls, 1, 'the certs fetch is counted');
@@ -318,7 +318,7 @@ test('GET /api/golive/me names the person; the Access keys come out of the same 
 });
 
 test('unknown sites, paths and methods are refused before anything happens', async () => {
-  const w = world();
+  const w = await world();
   const cases = [
     ['GET', '/api/golive', 404, 'Not found.'],
     ['GET', '/api/golive/', 404, 'Not found.'],
@@ -339,7 +339,7 @@ test('unknown sites, paths and methods are refused before anything happens', asy
 });
 
 test('a body that is not a JSON object, or a bad include_pair, is a 400', async () => {
-  const w = world();
+  const w = await world();
   for (const body of ['{"include_pair":', '[true]', '"yes"', 'null']) {
     const r = await call(w, 'POST', path('check'), { body });
     assert.deepEqual([r.status, r.body], [400, { error: 'Body is not a JSON object.', field: null }], body);
@@ -352,7 +352,7 @@ test('a body that is not a JSON object, or a bad include_pair, is a 400', async 
 // --- The whole cycle ---
 
 test('check, start, Check now and Roll back: the switch happens, and the zone ends exactly as it began', async () => {
-  const w = world();
+  const w = await world();
   const before = zoneState(w);
   const mailIds = w.fake.state.records.filter((r) => r.type === 'MX' || r.type === 'TXT').map((r) => r.id).sort();
 
@@ -365,7 +365,7 @@ test('check, start, Check now and Roll back: the switch happens, and the zone en
   assert.match(c.body.plan_hash, /^[0-9a-f]{64}$/);
   assert.deepEqual(c.body.acks.map((a) => a.id), ['gate12', 'wrangler']);
   assert.deepEqual(c.body.plan.hosts.map((h) => h.hostname), ['acme.com', 'www.acme.com']);
-  const saved = store.goliveLastCheck(w.storage.sql, SITE_ID);
+  const saved = await w.store.goliveLastCheck(SITE_ID);
   assert.deepEqual(saved, {
     site_id: SITE_ID, plan_hash: c.body.plan_hash, checks_hash: saved.checks_hash, include_pair: true, ready: true, acks: c.body.acks,
     checked_by: ANA, checked_at: iso(),
@@ -464,11 +464,11 @@ test('with the pair unticked only the live host moves, and www keeps its own rec
     { type: 'A', name: 'acme.com', content: '192.0.2.10', proxied: true },
     { type: 'A', name: 'www.acme.com', content: '192.0.2.20', proxied: true },
   ];
-  const w = world({ records });
+  const w = await world({ records });
   const c = await checkSite(w, false);
   assert.equal(c.body.ready, true);
   assert.equal(c.body.checks.find((x) => x.id === 'hosts').status, 'warn');
-  assert.equal(store.goliveLastCheck(w.storage.sql, SITE_ID).include_pair, false);
+  assert.equal((await w.store.goliveLastCheck(SITE_ID)).include_pair, false);
   const s = await start(w, c, { include_pair: false });
   assert.equal(s.status, 200, JSON.stringify(s.body));
   assert.deepEqual(domainState(w), ['acme.com on staging-acme']);
@@ -480,7 +480,7 @@ test('with the pair unticked only the live host moves, and www keeps its own rec
 // --- What a start refuses ---
 
 test('a start needs a check: saved, ready, under ten minutes old and for the same hostnames', async () => {
-  const w = world();
+  const w = await world();
   const before = zoneState(w);
   const body = { include_pair: true, confirm: 'acme.com', plan_hash: 'x', acks: ['gate12', 'wrangler'] };
 
@@ -508,12 +508,12 @@ test('a start needs a check: saved, ready, under ten minutes old and for the sam
   assert.match(notReady.body.error, /something to fix first/);
 
   assert.deepEqual([none, old, other, notReady].map((x) => x.waits.length), [0, 0, 0, 0]);
-  assert.equal(rowOf(w), null, 'no go-live was begun');
+  assert.equal(await rowOf(w), null, 'no go-live was begun');
   assert.deepEqual(zoneState(w), before);
 });
 
 test('a plan that changed since the check is refused with the fresh plan, and nothing is changed', async () => {
-  const w = world();
+  const w = await world();
   const c = await checkSite(w);
   // Someone adds a second address on the apex in the dashboard.
   await w.admin.createDnsRecord(ZONE, { type: 'A', name: 'acme.com', content: '192.0.2.11', proxied: true, ttl: 1 });
@@ -527,7 +527,7 @@ test('a plan that changed since the check is refused with the fresh plan, and no
   assert.equal(r.body.ready, true);
   assert.deepEqual(r.body.acks.map((a) => a.id), ['gate12', 'wrangler']);
   assert.deepEqual(zoneState(w), after);
-  assert.equal(rowOf(w), null);
+  assert.equal(await rowOf(w), null);
 
   // The page's own hash must match too.
   const c2 = await checkSite(w);
@@ -549,7 +549,7 @@ test('a plan that changed since the check is refused with the fresh plan, and no
 // changes neither the plan nor readiness, only a warning. The person must
 // see it before anything moves.
 test('a new warning since the check stops the start, even when the plan is the same', async () => {
-  const w = world();
+  const w = await world();
   const c = await checkSite(w);
   assert.equal(c.body.checks.find((x) => x.id === 'mail').status, 'pass');
   await w.admin.createDnsRecord(ZONE, { type: 'CNAME', name: 'cpanel.acme.com', content: 'acme.com', proxied: false, ttl: 1 });
@@ -560,7 +560,7 @@ test('a new warning since the check stops the start, even when the plan is the s
   assert.equal(r.body.ready, true);
   assert.equal(r.body.checks.find((x) => x.id === 'mail').status, 'warn');
   assert.deepEqual(r.waits, []);
-  assert.equal(rowOf(w), null, 'nothing was begun');
+  assert.equal(await rowOf(w), null, 'nothing was begun');
   assert.deepEqual(zoneState(w), after);
 
   // Checked again, the warning has been seen, and the start goes ahead.
@@ -582,7 +582,7 @@ test('a start that would leave too few calls for the switch and a full put-back 
     if (page > 1) body.result = [{ id: 'pad' + page, type: 'TXT', name: `pad${page}.acme.com`, content: 'x', proxied: false, ttl: 1, meta: {} }];
     return Response.json({ ...body, result_info: { ...body.result_info, page, total_pages: pages } });
   };
-  const w = world({ wrap: padded });
+  const w = await world({ wrap: padded });
   const before = zoneState(w);
   const c = await checkSite(w);
   assert.equal(c.body.ready, true);
@@ -591,13 +591,13 @@ test('a start that would leave too few calls for the switch and a full put-back 
   assert.deepEqual([r.status, r.body.code], [409, 'too-many-calls']);
   assert.equal(r.body.error, 'This switch needs more Cloudflare calls than one request allows. Ask a developer.');
   assert.deepEqual(r.waits, []);
-  assert.equal(rowOf(w), null, 'nothing was begun');
+  assert.equal(await rowOf(w), null, 'nothing was begun');
   assert.deepEqual(zoneState(w), before);
   assert.deepEqual(domainState(w), []);
 });
 
 test('the typed hostname and every acknowledgement are required', async () => {
-  const w = world();
+  const w = await world();
   const before = zoneState(w);
   const c = await checkSite(w);
 
@@ -614,7 +614,7 @@ test('the typed hostname and every acknowledgement are required', async () => {
   const one = await start(w, c, { acks: ['gate12', 'friday'] });
   assert.deepEqual(one.body.acks.map((a) => a.id), ['wrangler']);
   assert.match(one.body.error, /^Tick every acknowledgement first: I have checked tbox\/acme-site’s wrangler config/);
-  assert.equal(rowOf(w), null);
+  assert.equal(await rowOf(w), null);
   assert.deepEqual(zoneState(w), before);
 
   // Acknowledgements as { id } objects, and the hostname in any case.
@@ -623,14 +623,14 @@ test('the typed hostname and every acknowledgement are required', async () => {
 });
 
 test('on a Friday in Toronto the friday acknowledgement is needed as well, even if it turned Friday after the check', async () => {
-  const w = world();
+  const w = await world();
   clock.t = FRIDAY;
   const c = await checkSite(w);
   assert.deepEqual(c.body.acks.map((a) => a.id), ['gate12', 'wrangler', 'friday']);
   assert.equal((await start(w, c, { acks: ['gate12', 'wrangler'] })).body.code, 'acks-missing');
 
   // Thursday 23:55 in Toronto, then 00:01 on Friday.
-  const late = world();
+  const late = await world();
   clock.t = Date.parse('2026-09-25T03:55:00Z');
   const c2 = await checkSite(late);
   assert.deepEqual(c2.body.acks.map((a) => a.id), ['gate12', 'wrangler']);
@@ -644,7 +644,7 @@ test('on a Friday in Toronto the friday acknowledgement is needed as well, even 
 });
 
 test('busy: while another run holds the row, start and Roll back wait; a stale one can be rolled back', async () => {
-  const w = world();
+  const w = await world();
   const before = zoneState(w);
   const c = await checkSite(w);
   // Ben's switch is running from another tab.
@@ -675,13 +675,13 @@ test('busy: while another run holds the row, start and Roll back wait; a stale o
 
 test('the hostname lock: another site\'s unfinished go-live on the same host fails the check', async () => {
   const other = { id: OTHER_ID, name: 'Acme (old record)', live_domain: 'acme.com', staging_domain: STAGING, live_platform: 'astro' };
-  const w = world({ sites: [SITE, other] });
+  const w = await world({ sites: [SITE, other] });
   const record = {
     zone_id: ZONE, zone_name: 'acme.com', worker: W, staging_host: STAGING, main_host: 'acme.com',
     hosts: [{ hostname: 'acme.com', role: 'main' }], saved_records: [], saved_domains: [], redirect: null, mx_txt: [],
   };
-  store.goliveBegin(w.storage.sql, OTHER_ID, { kind: 'switch', who: 'ben@example.org', record, token: 't', now: iso() });
-  store.goliveFinish(w.storage.sql, OTHER_ID, 't', { state: 'checking', fields: { switched_at: iso() }, now: iso() });
+  await w.store.goliveBegin(OTHER_ID, { kind: 'switch', who: 'ben@example.org', record, token: 't', now: iso() });
+  await w.store.goliveFinish(OTHER_ID, 't', { state: 'checking', fields: { switched_at: iso() }, now: iso() });
 
   const c = await checkSite(w);
   assert.equal(c.body.ready, false);
@@ -694,7 +694,7 @@ test('the hostname lock: another site\'s unfinished go-live on the same host fai
 // --- When a switch goes wrong ---
 
 test('a switch that fails before every host is attached puts everything back and answers 502', async () => {
-  const w = world({ wrap: failAttach('www.acme.com', 500, 10013, 'Workers are having a moment.') });
+  const w = await world({ wrap: failAttach('www.acme.com', 500, 10013, 'Workers are having a moment.') });
   const before = zoneState(w);
   const c = await checkSite(w);
   const s = await start(w, c);
@@ -730,7 +730,7 @@ test('with the most records a plan allows, a switch that fails late still leaves
     { type: 'MX', name: 'acme.com', content: 'mx.mailhost.net', priority: 10 },
   ];
   // www clashes on every try, so the attach is tried three times.
-  const w = world({ records: most, wrap: failAttach('www.acme.com', 409, 100117, "Hostname 'www.acme.com' already has externally managed DNS records.") });
+  const w = await world({ records: most, wrap: failAttach('www.acme.com', 409, 100117, "Hostname 'www.acme.com' already has externally managed DNS records.") });
   const before = zoneState(w);
   const c = await checkSite(w);
   assert.equal(c.body.ready, true);
@@ -744,7 +744,7 @@ test('with the most records a plan allows, a switch that fails late still leaves
 
   // One record more and the check refuses: the switch and its restore would
   // not both fit in one request.
-  const more = world({ records: [...most, { type: 'AAAA', name: 'acme.com', content: '2001:db8::2', proxied: true }] });
+  const more = await world({ records: [...most, { type: 'AAAA', name: 'acme.com', content: '2001:db8::2', proxied: true }] });
   const c2 = await checkSite(more);
   assert.equal(c2.body.ready, false);
   assert.match(c2.body.checks.find((x) => x.id === 'records').detail, /more Cloudflare calls than one request allows/);
@@ -758,7 +758,7 @@ test('a switch that runs out of its 90 seconds is put back within a fresh 60 of 
     if (init.method === 'PUT' && JSON.parse(init.body).hostname === 'acme.com') clock.t += 91 * SEC;
     return res;
   };
-  const w = world({ wrap: slow });
+  const w = await world({ wrap: slow });
   const before = zoneState(w);
   const c = await checkSite(w);
   const s = await start(w, c);
@@ -783,7 +783,7 @@ test('a restore that runs out of its own 60 seconds says what is not back, and R
     }
     return res;
   };
-  const w = world({ wrap: slow });
+  const w = await world({ wrap: slow });
   const before = zoneState(w);
   const c = await checkSite(w);
   const s = await start(w, c);
@@ -803,7 +803,7 @@ test('a restore that runs out of its own 60 seconds says what is not back, and R
 });
 
 test('a finish that fails is tried once more, and a failed finish never puts anything back', async () => {
-  const w = world();
+  const w = await world();
   const finish = w.desk.goliveFinish;
   let failures = 1;
   w.desk.goliveFinish = async (...args) => {
@@ -818,7 +818,7 @@ test('a finish that fails is tried once more, and a failed finish never puts any
 
   // The finish was written but its answer lost: the second try gets what
   // was saved, not "another run took over".
-  const w1 = world();
+  const w1 = await world();
   const real = w1.desk.goliveFinish;
   let lost = 1;
   w1.desk.goliveFinish = async (...args) => {
@@ -832,7 +832,7 @@ test('a finish that fails is tried once more, and a failed finish never puts any
   assert.equal(actions(s1.body.log).filter((a) => a === 'switched').length, 1, 'written once');
 
   // It fails twice: the switch has happened, so the desk says so and leaves it.
-  const w2 = world();
+  const w2 = await world();
   w2.desk.goliveFinish = async () => { throw new Error('Durable Object storage is unavailable.'); };
   const from2 = w2.fake.calls.length;
   const c = await checkSite(w2);
@@ -842,24 +842,24 @@ test('a finish that fails is tried once more, and a failed finish never puts any
   assert.match(r.body.error, /^Every host is on staging-acme, but the desk could not record that the switch finished \(Durable Object storage is unavailable\.\)/);
   assert.deepEqual(cfCalls(w2, from2, isDetach), []);
   assert.deepEqual(domainState(w2), ['acme.com on staging-acme', 'www.acme.com on staging-acme']);
-  assert.equal(rowOf(w2).state, 'switching');
+  assert.equal((await rowOf(w2)).state, 'switching');
 
   // Two minutes on, Check now carries on from there.
   clock.t += 2 * MINUTE + SEC;
   const v = await call(w2, 'POST', path('verify'));
   assert.equal(v.status, 200, JSON.stringify(v.body));
   assert.ok(['checking', 'live'].includes(v.body.golive.state));
-  assert.ok(store.goliveDetail(w2.storage.sql, SITE_ID, clock.t).log.some((x) => x.action === 'resumed'));
+  assert.ok((await w2.store.goliveDetail(SITE_ID, clock.t)).log.some((x) => x.action === 'resumed'));
   assert.equal(v.body.site.live_platform, 'astro');
 });
 
 test('a switch whose row another run took over stops at once and puts nothing back', async () => {
-  const w = world();
+  const w = await world();
   const step = w.desk.goliveStep;
   let n = 0;
   w.desk.goliveStep = async (...args) => {
     // A Roll back takes the row between the switch's first and second step.
-    if (++n === 2) w.storage.sql.exec("UPDATE golive SET run_token = 'rollback-run' WHERE site_id = ?", SITE_ID);
+    if (++n === 2) await exec(w, "UPDATE golive SET run_token = 'rollback-run' WHERE site_id = ?", SITE_ID);
     return step(...args);
   };
   const c = await checkSite(w);
@@ -873,7 +873,7 @@ test('a switch whose row another run took over stops at once and puts nothing ba
 });
 
 test('a redirect that cannot be added does not stop the switch; the row says what failed', async () => {
-  const w = world();
+  const w = await world();
   w.fake.failOn('POST', /^\/zones\/[^/]+\/rulesets(\/[^/]+\/rules)?$/, { status: 500, codes: [10001], message: 'Rules are having a moment.' });
   const { s } = await goLive(w);
   assert.equal(s.body.golive.state, 'checking');
@@ -895,7 +895,7 @@ test('a redirect that cannot be added does not stop the switch; the row says wha
 // --- Roll back and Check now ---
 
 test('a Roll back more than seven days after the switch needs the old-host acknowledgement', async () => {
-  const w = world();
+  const w = await world();
   await goLive(w);
   clock.t += 7 * DAY + MINUTE;
   const r = await rollBack(w);
@@ -903,7 +903,7 @@ test('a Roll back more than seven days after the switch needs the old-host ackno
   assert.deepEqual(r.body.acks, [{
     id: 'old-host', label: 'The old host is still ours: its address has not been switched off or given up (gate 20)',
   }]);
-  assert.equal(rowOf(w).state, 'checking', 'nothing was begun');
+  assert.equal((await rowOf(w)).state, 'checking', 'nothing was begun');
 
   const ok = await rollBack(w, { confirm: 'acme.com', acks: ['old-host'] });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
@@ -928,7 +928,7 @@ test('a Roll back of a failed or stopped switch started more than seven days ago
     }
     return res;
   };
-  const w = world({ wrap: slow });
+  const w = await world({ wrap: slow });
   const before = zoneState(w);
   const s = await start(w, await checkSite(w));
   assert.deepEqual([s.body.golive.state, s.body.golive.restored, s.body.golive.switched_at], ['switch-failed', 0, null]);
@@ -936,13 +936,13 @@ test('a Roll back of a failed or stopped switch started more than seven days ago
   const r = await rollBack(w);
   assert.deepEqual([r.status, r.body.code], [400, 'acks-missing']);
   assert.deepEqual(r.body.acks.map((a) => a.id), ['old-host']);
-  assert.equal(rowOf(w).state, 'switch-failed', 'nothing was begun');
+  assert.equal((await rowOf(w)).state, 'switch-failed', 'nothing was begun');
   const ok = await rollBack(w, { confirm: 'acme.com', acks: ['old-host'] });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.deepEqual(zoneState(w), before);
 
   // A switch that stopped part-way: stale for a week, never switched.
-  const w2 = world();
+  const w2 = await world();
   const c = await checkSite(w2);
   await w2.desk.goliveBegin(SITE_ID, { kind: 'switch', who: 'ben@example.org', record: c.body.plan, acks: [], token: 'lost', now: iso() });
   clock.t += 7 * DAY + MINUTE;
@@ -951,7 +951,7 @@ test('a Roll back of a failed or stopped switch started more than seven days ago
 });
 
 test('Roll back is refused with nothing to undo, or without the typed hostname', async () => {
-  const w = world();
+  const w = await world();
   const none = await rollBack(w);
   assert.deepEqual([none.status, none.body.code], [409, 'nothing-to-undo']);
   assert.equal(none.body.golive, null);
@@ -963,28 +963,30 @@ test('Roll back is refused with nothing to undo, or without the typed hostname',
     assert.equal(r.body.error, 'Type acme.com exactly to roll it back.');
     assert.deepEqual(r.waits, []);
   }
-  assert.equal(rowOf(w).state, 'checking');
+  assert.equal((await rowOf(w)).state, 'checking');
 });
 
 // Check now reads the row, then spends a while on the network. What it
 // found about one run must never make a later run live.
 test('Check now saves nothing when the go-live was started again while it was checking', async () => {
-  const w = world();
+  const w = await world();
   await goLive(w);
   clock.t += 5 * MINUTE;
   const live = w.web.pages['https://acme.com/*'];
   let once = true;
-  w.web.pages['https://acme.com/*'] = (url, init) => {
+  w.web.pages['https://acme.com/*'] = async (url, init) => {
     // Rolled back and switched again from another tab, meanwhile.
-    if (once) w.storage.sql.exec('UPDATE golive SET started_at = ? WHERE site_id = ?', iso(), SITE_ID);
-    once = false;
+    if (once) {
+      once = false;
+      await exec(w, 'UPDATE golive SET started_at = ? WHERE site_id = ?', iso(), SITE_ID);
+    }
     return live(url, init);
   };
   const v = await call(w, 'POST', path('verify'));
   assert.deepEqual([v.status, v.body.code], [409, 'not-switched']);
   assert.equal(v.body.error, 'This go-live was rolled back or started again while the desk was checking it, so the check was not saved. Check again.');
-  assert.equal(rowOf(w).state, 'checking', 'not made live');
-  assert.equal(rowOf(w).checks, null);
+  assert.equal((await rowOf(w)).state, 'checking', 'not made live');
+  assert.equal((await rowOf(w)).checks, null);
 
   const again = await call(w, 'POST', path('verify'));
   assert.equal(again.body.golive.state, 'live');
@@ -1003,7 +1005,7 @@ test('a redirect rule whose answer was lost is found by its ref and recorded, an
     }
     return res;
   };
-  const w = world({ wrap: lossy });
+  const w = await world({ wrap: lossy });
   const { s } = await goLive(w);
   assert.equal(ourRules(w).length, 1);
   assert.deepEqual(s.body.golive.redirect_rule, { ruleset_id: w.fake.state.rulesets[0].id, rule_id: ourRules(w)[0].id, ref: REF });
@@ -1019,10 +1021,10 @@ test('a redirect rule whose answer was lost is found by its ref and recorded, an
 // The row lost track of its rule (a switch cut off after Cloudflare made it,
 // then resumed by Check now): verify finds it by its ref, and the row keeps it.
 test('Check now finds a redirect rule the row does not know about, and records it', async () => {
-  const w = world();
+  const w = await world();
   await goLive(w);
   const [rule] = ourRules(w);
-  w.storage.sql.exec("UPDATE golive SET redirect_rule = NULL, error = 'The redirect rule was not added: no answer.' WHERE site_id = ?", SITE_ID);
+  await exec(w, "UPDATE golive SET redirect_rule = NULL, error = 'The redirect rule was not added: no answer.' WHERE site_id = ?", SITE_ID);
   clock.t += 5 * MINUTE;
   const v = await call(w, 'POST', path('verify'));
   assert.equal(v.status, 200, JSON.stringify(v.body));
@@ -1030,14 +1032,14 @@ test('Check now finds a redirect rule the row does not know about, and records i
   assert.equal(v.body.golive.state, 'live');
   assert.deepEqual(v.body.golive.redirect_rule, { ruleset_id: w.fake.state.rulesets[0].id, rule_id: rule.id, ref: REF });
   assert.equal(v.body.golive.error, null);
-  assert.ok(actions(store.goliveDetail(w.storage.sql, SITE_ID, clock.t).log).includes('redirect-found'));
+  assert.ok(actions((await w.store.goliveDetail(SITE_ID, clock.t)).log).includes('redirect-found'));
   assert.equal(ourRules(w).length, 1, 'and no second rule');
 });
 
 test('a go-live record the desk cannot read is shown as such, and neither checked nor rolled back', async () => {
-  const w = world();
+  const w = await world();
   await goLive(w);
-  w.storage.sql.exec(`UPDATE golive SET saved_records = '[{"id":' WHERE site_id = ?`, SITE_ID);
+  await exec(w, `UPDATE golive SET saved_records = '[{"id":' WHERE site_id = ?`, SITE_ID);
   const from = w.fake.calls.length;
   const d = await call(w, 'GET', path());
   assert.equal(d.body.golive.state, 'unreadable');
@@ -1050,7 +1052,7 @@ test('a go-live record the desk cannot read is shown as such, and neither checke
 });
 
 test('Check now is refused while the site is not switched', async () => {
-  const w = world();
+  const w = await world();
   const none = await call(w, 'POST', path('verify'));
   assert.deepEqual([none.status, none.body.code], [409, 'not-switched']);
   assert.equal(none.body.golive, null);
@@ -1066,7 +1068,7 @@ async function signin(w, query, { token, env = ENV, method = 'GET' } = {}) {
 }
 
 test('signin sends the browser back to the page, and only ever to a fixed address', async () => {
-  const w = world();
+  const w = await world();
   const ok = await signin(w, '?site=' + SITE_ID);
   assert.equal(ok.status, 302);
   assert.equal(ok.headers.get('location'), '/#golive=' + SITE_ID);

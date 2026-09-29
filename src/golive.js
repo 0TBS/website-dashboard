@@ -1,7 +1,7 @@
 // Going live from the desk: the plan and its checks, the switch, the restore
 // that undoes it, and the checks that say it worked. Nothing here reaches out
 // on its own. Cloudflare (the client from cloudflare.js), the sites, public
-// DNS, sleeping and the Durable Object's record of each step are all passed
+// DNS, sleeping and the database's record of each step are all passed
 // in. The caller passes the request's one counted fetch, so every call made
 // here comes out of the request's budget, and the tests run whole switches
 // and rollbacks against fakes.
@@ -83,7 +83,7 @@ export class SwitchError extends Error {
   }
 }
 
-// A step the Durable Object refused because another run holds the row.
+// A step the database refused because another run holds the row.
 class Stale extends Error {}
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1216,7 +1216,7 @@ export async function switchOn({ record, cf, sleep = pause, step = noStep, budge
       throw stop(`Stopped before ${what}: the Cloudflare calls left in this request are kept for putting everything back.`);
     }
   };
-  // A step that cannot be written (the Durable Object reset or is busy)
+  // A step that cannot be written (the database cannot be reached)
   // leaves the row behind what was done. Before every host is attached the
   // switch stops, so the caller puts everything back. After that the site is
   // served from the Worker whatever the row says: the switch goes on and

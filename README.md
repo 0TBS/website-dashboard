@@ -33,14 +33,38 @@ Changes save as soon as you make them, and everyone sees the same list. When you
 
 The Edit dialog sends only the fields you changed. If a teammate saved the same site while your dialog was open, the desk refuses the save instead of overwriting their change. The dialog then shows their version with your changes on top. Any field you both changed is highlighted for you to check before saving again.
 
+Each site also keeps its details, each with Add, Edit and Remove:
+
+| Section | Holds |
+| --- | --- |
+| Services & accounts | Every account or resource the site uses: its Cloudflare Worker and zone, Backblaze bucket, database, Tag Manager, Analytics, Search Console, Google Ads, Business Profile, reCAPTCHA, Resend, Cal.com, Stripe, WordPress admin and other hosting. Each has its ID or name, a link to its dashboard, which account owns it, and notes. |
+| Contacts | The client's people: name, role, email, phone and notes. |
+| Domains | Every domain the site uses, and what for (live, staging, images, redirects, old domains), with its registrar, whether its DNS is on Cloudflare, and when it renews. |
+| History | Every change to the site and its details: when, who (when the desk knows), which field, and what it was before. |
+
+**Never put a password or API key in the desk.** Everyone with the desk key could read it. Write where the login lives instead, such as "1Password → Acme → Cloudflare".
+
 A site's row can also **Go live**: point its live domain at its staging Worker. The desk checks everything first, saves today's DNS records so the switch can be rolled back, and asks you to confirm. See [Going live from the desk](#going-live-from-the-desk).
 
 ## How it is built
 
 - **Cloudflare Worker** (`src/worker.js`) serves the page from `public/` and answers `/api/sites` and `/api/golive/*`.
-- **A Durable Object with SQLite** (`DESK` binding, class `Desk`) holds the list in one table, `sites`, and the go-live record in three more (`golive`, `golive_log`, `golive_checks`), inside one object placed in eastern North America. The tables are created the first time the object starts, so there is no migration step. It is not D1 because this Cloudflare account is at the Free plan's limit of 10 D1 databases, all used by client sites. A single object is also strongly consistent: every write goes through one place, one at a time.
-- **`src/sites.js`** is the one place that defines a site record: its fields, what each one may hold, and how input is cleaned. For example, `https://www.Example.com/` becomes `www.example.com`, and a GitHub link becomes `owner/repo`.
-- **Going live**: `src/golive.js` holds the checks, the switch, the put-back and the live check; `src/golive-routes.js` answers `/api/golive/*`; `src/golive-store.js` is the SQL for the go-live tables. `src/cloudflare.js` is a small client for the Cloudflare API, `src/access.js` checks the Cloudflare Access login with Web Crypto (no library), and `src/budget.js` counts the calls each request makes. None of them needs the Workers runtime, so `npm test` runs whole switches and rollbacks under plain Node against a fake Cloudflare (`test/fake-cloudflare.js`).
+- **Postgres on Neon** holds everything: Neon project `website-desk` (`small-bird-63386345`) in AWS US East, database `desk`, on the Branding org's free plan. The Worker reaches it with `pg` over a TCP socket, at the address in the `DATABASE_URL` secret. The tables:
+
+  | Table | Holds |
+  | --- | --- |
+  | `sites` | One row per site: the fields in the table above. |
+  | `site_services`, `site_contacts`, `site_domains` | A site's details, any number of each. They go when the site is deleted. |
+  | `history` | One row per field changed, and one per row added or removed. The database writes it itself, with a trigger, so no change can skip it. It is kept when the site is deleted. |
+  | `golive`, `golive_log`, `golive_checks` | Going live: where each site's go-live stands, every step it took, and the last check. |
+  | `schema_migrations`, `desk_meta` | Which schema steps have run, and when the old data was copied in. |
+
+- **The schema** is in `src/schema.js` as numbered steps. The Worker runs any it has not run yet the first time it reaches the database, so a deploy needs nothing run by hand. A change to the shape is a new step at the end. A step already on the live database is never edited.
+- **One write at a time** (`src/db.js`): each call is one transaction. Every write takes the same Postgres advisory lock first, so writes still run one after another, as they did in the Durable Object. Going live relies on this: a step reads the row, decides, and writes, and nothing lands in between. Reads take no lock.
+- **`src/sites.js`** is the one place that defines a site record: its fields, what each one may hold, and how input is cleaned. For example, `https://www.Example.com/` becomes `www.example.com`, and a GitHub link becomes `owner/repo`. **`src/details.js`** does the same for services, contacts and domains, and holds the list of service kinds. Adding a kind is one line there.
+- **`src/store.js`** is every read and write the Worker makes.
+- **Going live**: `src/golive.js` holds the checks, the switch, the put-back and the live check; `src/golive-routes.js` answers `/api/golive/*`; `src/golive-store.js` is the SQL for the go-live tables. `src/cloudflare.js` is a small client for the Cloudflare API, `src/access.js` checks the Cloudflare Access login with Web Crypto (no library), and `src/budget.js` counts the calls each request makes. None of them needs the Workers runtime, so `npm test` runs whole switches and rollbacks under plain Node against a fake Cloudflare (`test/fake-cloudflare.js`) and a real Postgres running inside the test process (PGlite, `test/pglite.js`).
+- **The old Durable Object** (`DESK` binding, class `Desk`) held the list until September 2026. The first time the new Worker reached Neon, it copied the object's four tables across in one transaction, keeping every id, time and log number, and recorded that in `desk_meta`. The object now only hands over its data. Its data is left as it was, so the previous Worker version can still be rolled back to. It will be deleted in a later release.
 - **The page** is plain HTML, CSS and JS in `public/`, with no framework and no build step.
 - **Privacy**: the list sits behind a shared desk key (`DASH_KEY`). With no key set, nobody can get in: the desk refuses every request rather than showing the list openly. `public/_headers` sends `X-Robots-Tag: noindex` and a strict Content-Security-Policy. Workers Logs drop query strings.
 - **Staying logged in** (`src/session.js`): the key is typed once. The Worker checks it and sets a login cookie in its place, and the browser stays logged in until someone presses **Log off**. The cookie is `HttpOnly`, so no script can read it, and `SameSite=Strict`. It holds a value made from the key, never the key itself. It lasts 400 days, the longest any browser allows, and every visit restarts that clock. The Worker sets it, not the page, so Safari does not clear it after seven days the way it clears `localStorage`. A browser that saved the key the old way, in `localStorage`, logs in with it once and then deletes it.
@@ -49,14 +73,17 @@ A site's row can also **Go live**: point its live domain at its staging Worker. 
 
 ## Run it locally
 
+Local runs need a Postgres of their own. Never point them at the live Neon database.
+
 ```sh
 npm install
-cp .dev.vars.example .dev.vars      # sets DASH_KEY=local-dev-key
+createdb desk_dev                   # any local Postgres 14 or later
+cp .dev.vars.example .dev.vars      # sets DASH_KEY=local-dev-key and DATABASE_URL
 npm run dev                         # http://127.0.0.1:8787, enter local-dev-key
-npm test                            # unit tests: field rules, login, going live
+npm test                            # unit tests: field rules, login, going live, the database
 ```
 
-Local runs keep their own copy of the data inside `.wrangler/`. They never touch the live list.
+`npm test` needs no Postgres: it runs one inside the test process. One test proves that writes from many connections at once still run one at a time. It needs a real server, so it is skipped unless `TEST_DATABASE_URL` points at a throwaway database. That test wipes the database it is given.
 
 ## Layout check: nothing scrolls sideways
 
@@ -86,6 +113,7 @@ The Worker `website-dashboard` runs on the Cloudflare account that holds the 10x
 - **Custom domain:** `website.10xid.com`. Cloudflare created the DNS record and certificate. It overrides the proxied `*.10xid.com` wildcard for this one hostname.
 - **workers.dev and preview URLs:** off. The desk has only one address.
 - **Desk key:** stored as a Worker secret named `DASH_KEY`. It is not a build variable.
+- **Database:** the Neon connection string, pooled (the `-pooler` host), stored as a Worker secret named `DATABASE_URL`. To change it, copy the new one from the Neon console (project `website-desk`, Connect, Pooled connection) and run `npx wrangler secret put DATABASE_URL`.
 - **Going live:** five more Worker secrets, a Cloudflare API token and a Cloudflare Access application. See [Setting it up](#setting-it-up).
 
 To redeploy after a change, run:
@@ -114,7 +142,7 @@ It handles both ways a client domain is set up on the account: DNS records that 
 2. Asks for the **acknowledgements**: *Gate 12 is approved in sites/&lt;domain&gt;.md*, *I have checked &lt;repo&gt;’s wrangler config (routes and custom domains)* (see below), and on a Friday, *It is Friday and this cannot wait*.
 3. Asks you to **type the live domain**: "Type acme.com to point it at staging-acme". **Go live** stays off until no check fails (warnings never block), every box is ticked and the name matches.
 4. **Reads Cloudflare again** just before switching. A start needs a check from the last ten minutes, for the same choice of hostnames. If a record, a Custom Domain or a host the switch acts on has changed since, the desk refuses and shows the new plan to read again.
-5. **Switches**, recording each step in the Durable Object as it happens. It deletes the old A, AAAA and CNAME records on the hosts (they were saved first), or detaches the hosts from the other Worker. It attaches each host to the staging Worker as a Custom Domain, main first, adds a 301 Single Redirect from the other host to the main one when both move, and sets **Live site runs on** to Astro.
+5. **Switches**, recording each step in the database as it happens. It deletes the old A, AAAA and CNAME records on the hosts (they were saved first), or detaches the hosts from the other Worker. It attaches each host to the staging Worker as a Custom Domain, main first, adds a 301 Single Redirect from the other host to the main one when both move, and sets **Live site runs on** to Astro.
 6. **Checks the live site** every 5 seconds for 10 minutes, and again whenever you press **Check now**. It passes when the live address serves a page over HTTPS with no noindex, the page comes from the same build as staging (the same `/_astro/` files), a second page answers, the other host answers with a 301 to the same path on the live one, every host is still on the staging Worker, public DNS (dns.google and cloudflare-dns.com) no longer gives the old address, and MX and TXT are as they were. The row then says **Live**. A later check that fails does not undo that; it shows what failed. A 5xx in the first two minutes counts as waiting, while Cloudflare puts the certificate in place.
 7. Shows the **gate 13 record**, ready to paste into `sites/<domain>.md`.
 
@@ -226,7 +254,14 @@ npx wrangler secret put GOLIVE_EMAILS         # who may go live: emails, separat
 
 ## Backups and undo
 
-A Durable Object's SQLite database keeps 30 days of point-in-time history on Cloudflare's side. There is no button for it on the desk. To undo a bad delete or edit, restore the object to a moment before it happened with `ctx.storage.getBookmarkForTime()` and `onNextSessionRestoreBookmark()`. This rolls back the whole list, not a single row. It rolls back the go-live record too, so never restore to a time before a go-live that is still switched: the records its Roll back needs would go with it.
+**Undoing one change:** the `history` table has the value every field held before each change, and every row that was removed. Look it up on the site's History, or in the Neon console's SQL editor:
+
+```sql
+SELECT at, who, item, action, field, old_value, new_value FROM history
+WHERE site_id = '<site id>' ORDER BY id DESC;
+```
+
+**Undoing everything since a moment:** Neon keeps **6 hours** of point-in-time history on the free plan (the Durable Object kept 30 days). Within that window, restore the branch to a moment before the mistake from the Neon console (Branches → main → Restore). This rolls back every table, the go-live record included. So never restore to a time before a go-live that is still switched: the records its Roll back needs would go with it. For a longer window, Neon's paid plans keep up to 30 days.
 
 For a copy you hold yourself, save the list:
 
@@ -246,6 +281,10 @@ Scripts send `Authorization: Bearer <DASH_KEY>` with every request. The page use
 | POST | `/api/sites` | a site (`name` required) | `201 { site }` |
 | PATCH | `/api/sites/:id` | only the fields to change, optionally `expected_updated_at` | `{ site }`, or `409 { code: "conflict", site }` if the row changed since that time |
 | DELETE | `/api/sites/:id` | – | `{ deleted: id }`, or `409 { code: "golive-active" }` while the site's go-live still needs someone |
+| GET | `/api/sites/:id/details` | – | `{ services, contacts, domains, history, choices }`; `history` is the latest 200 changes, newest first, and `choices` lists the service kinds and domain uses |
+| POST | `/api/sites/:id/services` (or `contacts`, `domains`) | the new item | `201 { item }` |
+| PATCH | `/api/sites/:id/services/:itemId` (or `contacts`, `domains`) | only the fields to change, optionally `expected_updated_at` | `{ item }`, or `409 { code: "conflict", item }` if it changed since that time |
+| DELETE | `/api/sites/:id/services/:itemId` (or `contacts`, `domains`) | – | `{ deleted: itemId }` |
 | GET | `/api/golive/signin?site=<id>` | – | Where Access sends you back after its login; needs no desk key. `302` to `/#golive=<id>` (`/` if the id is not a site id), or to `/#golive-error=<code>` |
 | GET | `/api/golive/me` | – | `{ email }` |
 | GET | `/api/golive/:id` | – | `{ site, golive, log, last_check }` |
@@ -261,7 +300,11 @@ Field values:
 - `chat_url`: a `claude.ai` link (`claude.ai/code/session_…` is fine; it is stored with `https://`), or `null`. Links anywhere else are refused.
 - `environment`: one line of up to 80 characters, or `null`.
 - `golive` (read only): where the site's go-live stands, or `null` if it never went live from the desk. It says whether there was an error (`has_error`) and what kind (`error_kind`), never its words: those can quote a saved record, so only `/api/golive/:id`, behind Access, has them.
+- A service: `kind` (required; one of `cloudflare_worker`, `cloudflare_zone`, `backblaze_bucket`, `database`, `gtm`, `ga4`, `search_console`, `google_ads`, `business_profile`, `recaptcha`, `resend`, `calcom`, `stripe`, `wordpress`, `hosting`, `other`), `identifier`, `url` (an http or https link), `account` and `notes`.
+- A contact: `name` (required), `role`, `email`, `phone` and `notes`.
+- A domain: `hostname` (required; a domain without a path, once per site), `role` (required; `live`, `staging`, `image`, `redirect`, `old` or `other`), `registrar`, `dns_on_cloudflare` (`true`, `false` or `null`), `renews_on` (`YYYY-MM-DD`) and `notes`.
 - Bad input returns `400 { error, field }`, naming the field that failed.
+- If the database cannot be reached, every request that needs it answers `503 { code: "database-unavailable" }`. After five minutes with no visits, Neon's free plan pauses the database. The next request wakes it, which takes up to a second or two.
 
 Going live needs more than the key. Every `/api/golive/*` request except `signin` also needs a Cloudflare Access token (`Cf-Access-Jwt-Assertion`, which Access adds) whose email is on `GOLIVE_EMAILS`. Otherwise it answers `503 golive-not-set-up { missing }`, `401 access-not-protecting`, `403 access-invalid`, `403 not-allowed` or `503 access-keys-unavailable`. `include_pair` is `true` unless it says `false`. `confirm` is the live domain as typed. `acks` lists the ids of the acknowledgements ticked (`gate12`, `wrangler`, and `friday` or `old-host` when asked).
 

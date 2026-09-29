@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanSite, normalizeAddress, normalizeRepo, normalizeChatUrl, toJson, InvalidField, ensureSitesSchema, COLUMNS } from '../src/sites.js';
-import { sqliteStorage } from './sqlite-adapter.js';
+import { cleanSite, normalizeAddress, normalizeRepo, normalizeChatUrl, toJson, InvalidField, COLUMNS } from '../src/sites.js';
+import { ITEMS } from '../src/details.js';
+import { MIGRATIONS, migrate } from '../src/schema.js';
+import { freshDatabase } from './pglite.js';
 
 test('addresses lose scheme, trailing slash and host case, keep a path', () => {
   assert.equal(normalizeAddress('https://WWW.Example.com/'), 'www.example.com');
@@ -85,26 +87,31 @@ test('an environment is one short line', () => {
   assert.throws(() => cleanSite({ environment: 'x'.repeat(81) }), (e) => e.field === 'environment');
 });
 
-test('the sites table gains chat_url and environment in place, keeping every row', () => {
-  const { sql } = sqliteStorage();
-  // The table as the live desk made it before these two fields existed.
-  sql.exec(`CREATE TABLE sites (id TEXT PRIMARY KEY, name TEXT NOT NULL, live_domain TEXT, staging_domain TEXT,
-    github_repo TEXT, live_platform TEXT, astro_staging INTEGER, domain_ours INTEGER, needs_seo_ppc INTEGER,
-    notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
-  sql.exec("INSERT INTO sites (id, name, created_at, updated_at) VALUES ('a', 'Acme', 't', 't')");
-  ensureSitesSchema(sql);
-  ensureSitesSchema(sql);   // a second start changes nothing
-  const cols = sql.exec('PRAGMA table_info(sites)').toArray().map((c) => c.name);
+const columnsOf = async (db, table) => (await db.query(
+  'SELECT column_name FROM information_schema.columns WHERE table_name = $1', [table]
+)).rows.map((c) => c.column_name);
+
+test('a fresh database has every column a site and its details are cleaned into', async () => {
+  const { db } = await freshDatabase();
+  const cols = await columnsOf(db, 'sites');
   for (const c of COLUMNS) assert.ok(cols.includes(c), c);
-  const row = sql.exec('SELECT * FROM sites').toArray()[0];
-  assert.equal(row.name, 'Acme');
-  assert.equal(row.chat_url, null);
-  assert.equal(row.environment, null);
+  for (const spec of Object.values(ITEMS)) {
+    const have = await columnsOf(db, spec.table);
+    for (const f of Object.keys(spec.fields)) assert.ok(have.includes(f), spec.table + '.' + f);
+  }
 });
 
-test('a fresh desk gets every column at once', () => {
-  const { sql } = sqliteStorage();
-  ensureSitesSchema(sql);
-  const cols = sql.exec('PRAGMA table_info(sites)').toArray().map((c) => c.name);
-  for (const c of COLUMNS) assert.ok(cols.includes(c), c);
+test('the migrations run once each, and running them again changes nothing', async () => {
+  const { db, connect } = await freshDatabase();
+  await db.query("INSERT INTO sites (id, name, created_at, updated_at) VALUES ('a', 'Acme', 't', 't')");
+  assert.equal(await migrate(connect), MIGRATIONS.length);
+  const done = (await db.query('SELECT version FROM schema_migrations ORDER BY version')).rows.map((r) => r.version);
+  assert.deepEqual(done, MIGRATIONS.map((_, i) => i + 1));
+  assert.equal((await db.query('SELECT name FROM sites')).rows[0].name, 'Acme');
+});
+
+test('the database refuses a flag or platform the desk would never write', async () => {
+  const { db } = await freshDatabase();
+  await assert.rejects(db.query("INSERT INTO sites (id, name, astro_staging, created_at, updated_at) VALUES ('a', 'A', 2, 't', 't')"));
+  await assert.rejects(db.query("INSERT INTO sites (id, name, live_platform, created_at, updated_at) VALUES ('a', 'A', 'wix', 't', 't')"));
 });

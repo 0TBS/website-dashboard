@@ -3,7 +3,7 @@
 // checks the rest, in this order: that going live is set up on this Worker,
 // then the person's own Cloudflare Access login, then the endpoint itself.
 //
-// `store` is the Desk Durable Object, whose go-live methods are the
+// `store` is the desk's Store (store.js), whose go-live methods are the
 // functions in golive-store.js. Every call a request makes to the outside
 // (the Access keys, the Cloudflare API, the sites, public DNS) goes through
 // one counted fetch, so a switch always knows how many calls it has left.
@@ -21,7 +21,7 @@ import {
 } from './golive.js';
 
 // A site id as crypto.randomUUID() makes them. Nothing else reaches the
-// Durable Object or an address the desk redirects to.
+// database or an address the desk redirects to.
 const SITE_ID = /^[0-9a-f-]{36}$/;
 
 // The Cloudflare settings. access.js names the Access ones. Not CF_API_TOKEN
