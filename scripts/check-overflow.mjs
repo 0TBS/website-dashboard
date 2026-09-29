@@ -806,11 +806,13 @@ function detailsStates(base, target, details) {
     }]);
   }
   const service = fullest(details.services);
-  const armed = fullest(details.domains) || service || fullest(details.contacts);
+  // Each kind counts from 0001, so an item is its kind and its id together.
+  const [armedKind, armed] = [['domains', fullest(details.domains)], ['services', service], ['contacts', fullest(details.contacts)]]
+    .find(([, it]) => it) || [];
   if (armed) {
     S.push(['details: remove armed', async (p) => {
       await open(p);
-      await box(p).locator(`[data-dact="remove"][data-item="${armed.id}"]`).click();   // first tap only arms it
+      await box(p).locator(`[data-dact="remove"][data-kind="${armedKind}"][data-item="${armed.id}"]`).click();   // first tap only arms it
     }]);
   }
   if (!LIVE && service) {

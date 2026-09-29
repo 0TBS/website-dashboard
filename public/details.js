@@ -253,16 +253,22 @@
 
   // ---- history ----
   // The name of each item the history mentions: as it is now, or as it was
-  // when it was added or removed.
+  // when it was added or removed. Keyed by what it is and its id: each kind
+  // counts from 0001, so service 0001 and contact 0001 are two things.
+  const nameKey = (item, id) => item + ':' + id;
+  const ITEM_OF = Object.fromEntries(Object.entries(ITEM_KIND).map(([item, kind]) => [kind, item]));
   function historyNames(data) {
     const names = new Map();
     const choices = data.choices || {};
     for (const h of data.history || []) {
       const kind = ITEM_KIND[h.item];
       const row = kind && h.action !== 'changed' && parse(h.action === 'added' ? h.new_value : h.old_value);
-      if (row && !names.has(h.item_id)) names.set(h.item_id, itemName(kind, row, choices));
+      const key = nameKey(h.item, h.item_id);
+      if (row && !names.has(key)) names.set(key, itemName(kind, row, choices));
     }
-    for (const kind of ITEM_KINDS) for (const it of data[kind] || []) names.set(it.id, itemName(kind, it, choices));
+    for (const kind of ITEM_KINDS) {
+      for (const it of data[kind] || []) names.set(nameKey(ITEM_OF[kind], it.id), itemName(kind, it, choices));
+    }
     return names;
   }
   function parse(text) {
@@ -303,7 +309,7 @@
   function historyLine(h, names, choices) {
     const who = esc(h.who || 'Someone');
     const kind = ITEM_KIND[h.item];
-    const what = h.item === 'site' ? 'this site' : itemWords(kind, h.item, names.get(h.item_id) || '');
+    const what = h.item === 'site' ? 'this site' : itemWords(kind, h.item, names.get(nameKey(h.item, h.item_id)) || '');
     let text;
     if (h.action === 'added' || h.action === 'removed') {
       const row = kind && parse(h.action === 'added' ? h.new_value : h.old_value);

@@ -673,7 +673,7 @@ const GL_STORE = 'webdesk.golive';     // sessionStorage: the site being opened,
 const GL_POLL = 5000;                  // the live check runs again this often
 const GL_POLL_FOR = 10 * 60 * 1000;    // for this long
 const GL_OLD = 7 * 86400000;           // a switch older than this needs the old-host ack to roll back
-const GL_ID = /^[0-9a-f-]{36}$/;
+const GL_ID = /^[0-9]{4,12}$/;
 const DESK_CODES = ['locked', 'stale-session', 'bad-key', 'no-key-configured'];
 const PLAN_CHANGED = 'The plan changed since you checked. Read it again.';
 const NO_ANSWER = 'The connection dropped before the desk answered. This is where it stands now.';
@@ -1418,7 +1418,7 @@ function glFromUrl() {
   } catch { /* storage blocked: the address is enough */ }
   if (!saved || typeof saved.id !== 'string' || !GL_ID.test(saved.id) || !(Date.now() - saved.at < 10 * 60 * 1000)) saved = null;
   if (saved && !['go', 'rollback', 'check', 'resume'].includes(saved.mode)) saved.mode = 'resume';
-  let m = /^#golive=([0-9a-f-]{36})$/.exec(location.hash);
+  let m = /^#golive=([0-9]{4,12})$/.exec(location.hash);
   if (m) return { id: m[1], mode: saved && saved.id === m[1] ? saved.mode : 'resume' };
   m = /^#golive-error=([a-z0-9-]{1,40})$/.exec(location.hash);
   if (m) return { id: saved && saved.id, mode: 'resume', error: m[1] };
