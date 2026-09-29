@@ -8,11 +8,13 @@
 // `contact.email`, `delegates.1.position`, `services.0.kind`, `jobs.2.url`,
 // so the page can mark the box that is wrong.
 //
-// Never a password, here as anywhere on the desk: "login info" says where the
-// login lives, and a line that looks like a password is refused.
+// A service's password goes in its own box, and the Worker encrypts it
+// before it is stored (secrets.js). Login info is the username or email, so
+// a password typed there by mistake is refused rather than kept in the clear.
 
 import { InvalidField, normalizeAddress, normalizeText } from './sites.js';
 import { cleanItem, JOB_TASKS } from './details.js';
+import { cleanPassword } from './secrets.js';
 
 // The ticks beside the job list. Recorded with the site (client_forms); the
 // desk does not send any email yet.
@@ -31,7 +33,7 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const blank = (v) => v == null || (typeof v === 'string' && !v.trim()) || v === false;
 
 // "password: hunter2", "pw = …", "pass - …": the shape of a password written
-// down. Where the login lives ("1Password → Acme → GoDaddy") passes.
+// down. A username, an email or where the login lives passes.
 const PASSWORD = /\b(password|passwd|passcode|pass|pwd|pw)\b\s*[:=\-]/i;
 
 // Runs one part's cleaner and renames its error to the form's own field.
@@ -56,8 +58,9 @@ function flag(v) {
 }
 
 // → { site, contacts, services, jobs, options }, every part ready for the
-// store. Rows left completely empty are dropped, as a person leaves a spare
-// row on paper.
+// store, except each service's password, which is still as typed (or null)
+// for the Worker to encrypt. Rows left completely empty are dropped, as a
+// person leaves a spare row on paper.
 export function cleanClientForm(input) {
   if (!isObject(input)) throw new InvalidField(null, 'Expected a JSON object.');
 
@@ -85,12 +88,15 @@ export function cleanClientForm(input) {
 
   const services = [];
   list(input, 'services', 'Services').forEach((s, i) => {
-    if (blank(s.kind) && blank(s.login)) return;
+    if (blank(s.kind) && blank(s.login) && blank(s.password)) return;
     const out = part(`services.${i}.`, `Service ${i + 1}`, { account: 'login' }, () =>
       cleanItem('services', { kind: s.kind || null, account: s.login }, { creating: true }));
     if (out.account && PASSWORD.test(out.account)) {
       throw new InvalidField(`services.${i}.login`,
-        `Service ${i + 1}: Login info looks like a password. Never put a password on the desk: say where the login lives, such as "1Password → Acme → GoDaddy".`);
+        `Service ${i + 1}: Login info looks like a password. Put the password in the Password box, where it is stored encrypted.`);
+    }
+    try { out.password = cleanPassword(s.password); } catch (e) {
+      throw new InvalidField(`services.${i}.password`, `Service ${i + 1}: Password ${e.message}.`);
     }
     services.push(out);
   });

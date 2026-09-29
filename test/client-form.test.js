@@ -38,8 +38,8 @@ test('the form becomes a site, its contacts, services, jobs and options, empty r
     { name: 'Bo Chan', email: 'bo@acmeglass.com', phone: null, role: 'Office manager' },
   ]);
   assert.deepEqual(out.services, [
-    { kind: 'godaddy', account: '1Password → Acme → GoDaddy' },
-    { kind: 'backblaze_bucket', account: null },
+    { kind: 'godaddy', account: '1Password → Acme → GoDaddy', password: null },
+    { kind: 'backblaze_bucket', account: null, password: null },
   ]);
   assert.deepEqual(out.jobs, [
     { url: 'acmeglass.com', clone: 1, database_b2: 1, seo_ppc: 0, live: 0 },

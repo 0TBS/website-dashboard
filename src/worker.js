@@ -15,6 +15,8 @@ import { DurableObject } from 'cloudflare:workers';
 import { cleanSite, InvalidField } from './sites.js';
 import { cleanItem, KINDS, ITEMS, CHOICES, SERVICE_KINDS, JOB_TASKS } from './details.js';
 import { cleanClientForm, OPTIONS, LIMITS } from './client-form.js';
+import { cleanPassword, encryptPassword, decryptPassword, SecretsNotSetUp } from './secrets.js';
+import { formEmails, sendEmails, DEFAULT_FROM, DEFAULT_REP } from './notify.js';
 import { sessionToken, cookieValues, sessionCookie, clearCookie } from './session.js';
 import { json } from './answers.js';
 import { pgSession } from './db.js';
@@ -175,8 +177,8 @@ async function handleApi(request, env, url, ctx) {
     const res = parts[2] === 'golive'
       ? await handleGoLive(request, env, { parts, url, store, waitUntil })
       : parts[2] === 'client-form'
-        ? await handleClientForm(request, store, parts)
-        : await handleSites(request, store, parts);
+        ? await handleClientForm(request, store, parts, env, url)
+        : await handleSites(request, store, parts, env);
     // Each visit restarts the cookie's 400 days, so an active browser never expires.
     if (cred === 'cookie') res.headers.append('set-cookie', sessionCookie(await sessionToken(env.DASH_KEY), secure));
     return res;
@@ -207,9 +209,10 @@ function expectedFrom(body) {
 //   POST   /api/sites/:id/:kind          add a service, contact, domain or social link
 //   PATCH  /api/sites/:id/:kind/:itemId  change one
 //   DELETE /api/sites/:id/:kind/:itemId  remove one
-async function handleSites(request, db, parts) {
-  if (parts[2] !== 'sites' || parts.length > 6) return json({ error: 'Not found.' }, 404);
-  const [id, kind, itemId] = parts.slice(3);
+async function handleSites(request, db, parts, env) {
+  if (parts[2] !== 'sites' || parts.length > 7) return json({ error: 'Not found.' }, 404);
+  const [id, kind, itemId, extra] = parts.slice(3);
+  if (extra && !(kind === 'services' && extra === 'password')) return json({ error: 'Not found.' }, 404);
   if (id && !ID.test(id)) return notFound();
   const m = request.method;
 
@@ -219,7 +222,8 @@ async function handleSites(request, db, parts) {
       const details = await db.details(id);
       return details ? json({ ...details, choices: CHOICES }) : notFound();
     }
-    if (kind) return await handleItem(request, db, m, id, kind, itemId);
+    if (extra) return await handlePassword(request, db, m, id, itemId, env);
+    if (kind) return await handleItem(request, db, m, id, kind, itemId, env);
 
     if (!id && m === 'GET') return json({ sites: await db.list() });
     if (!id && m === 'POST') {
@@ -250,6 +254,7 @@ async function handleSites(request, db, parts) {
     return json({ error: 'Method not allowed.' }, 405);
   } catch (e) {
     if (e instanceof InvalidField) return json({ error: e.message, field: e.field }, 400);
+    if (e instanceof SecretsNotSetUp) return json({ error: e.message, code: e.code }, 503);
     throw e;
   }
 }
@@ -264,15 +269,30 @@ const DUPLICATE = {
 //   POST /api/client-form        the whole form: a new site and everything under it
 const FORM_CHOICES = { service_kinds: SERVICE_KINDS, job_tasks: JOB_TASKS, options: OPTIONS, limits: LIMITS };
 
-async function handleClientForm(request, db, parts) {
+// Saving the form: every password is encrypted first, so a form with a
+// password and no CREDENTIALS_KEY is refused whole, before anything is
+// written. The emails go after the save, and the answer says how each went.
+async function handleClientForm(request, db, parts, env, url) {
   const m = request.method;
   if (parts.length === 3 && m === 'GET') return json({ choices: FORM_CHOICES });
   if (parts.length === 3 && m === 'POST') {
     try {
-      const res = await db.createClient(cleanClientForm(await readBody(request)));
-      return json({ site: res.site }, 201);
+      const form = cleanClientForm(await readBody(request));
+      const stored = { ...form, services: [] };
+      for (const s of form.services) {
+        stored.services.push({ ...s, password: s.password ? await encryptPassword(env.CREDENTIALS_KEY, s.password) : null });
+      }
+      const { site } = await db.createClient(stored);
+      const emails = await sendEmails(formEmails(form, site, {
+        deskUrl: url.origin, from: env.FORM_EMAIL_FROM || DEFAULT_FROM, rep: env.FORM_EMAIL_REP || DEFAULT_REP,
+      }), env.RESEND_API_KEY);
+      for (const e of emails.filter((x) => !x.sent)) {
+        console.error(JSON.stringify({ message: 'A client form email was not sent.', who: e.who, site: site.id, error: e.error }));
+      }
+      return json({ site, emails: emails.map(({ who, sent, error }) => ({ who, sent, ...(error ? { error } : {}) })) }, 201);
     } catch (e) {
       if (e instanceof InvalidField) return json({ error: e.message, field: e.field }, 400);
+      if (e instanceof SecretsNotSetUp) return json({ error: e.message, code: e.code }, 503);
       throw e;
     }
   }
@@ -280,12 +300,25 @@ async function handleClientForm(request, db, parts) {
   return json({ error: 'Method not allowed.' }, 405);
 }
 
-async function handleItem(request, db, m, siteId, kind, itemId) {
+// A service's `password` in the body: text sets it (encrypted here), null
+// or empty removes it, absent leaves it. Other kinds have no password.
+async function passwordFrom(kind, body, env) {
+  if (kind !== 'services' || !('password' in body)) return undefined;
+  let clean;
+  try { clean = cleanPassword(body.password); } catch (e) {
+    throw new InvalidField('password', 'Password ' + e.message + '.');
+  }
+  return clean === null ? null : encryptPassword(env.CREDENTIALS_KEY, clean);
+}
+
+async function handleItem(request, db, m, siteId, kind, itemId, env) {
   if (!KINDS.includes(kind) || (itemId && !ID.test(itemId))) return json({ error: 'Not found.' }, 404);
   const gone = () => json({ error: 'No such ' + ITEMS[kind].noun + ' on this site.' }, 404);
 
   if (!itemId && m === 'POST') {
-    const res = await db.createItem(kind, siteId, cleanItem(kind, await readBody(request), { creating: true }));
+    const body = await readBody(request);
+    const fields = cleanItem(kind, body, { creating: true });
+    const res = await db.createItem(kind, siteId, fields, { password: await passwordFrom(kind, body, env) });
     if (res.missing) return notFound();
     if (res.duplicate) throw new InvalidField(res.duplicate, DUPLICATE[res.duplicate]);
     return json({ item: res.item }, 201);
@@ -293,8 +326,9 @@ async function handleItem(request, db, m, siteId, kind, itemId) {
   if (itemId && m === 'PATCH') {
     const body = await readBody(request);
     const fields = cleanItem(kind, body);
-    if (!Object.keys(fields).length) throw new InvalidField(null, 'Nothing to change.');
-    const res = await db.updateItem(kind, siteId, itemId, fields, expectedFrom(body));
+    const password = await passwordFrom(kind, body, env);
+    if (!Object.keys(fields).length && password === undefined) throw new InvalidField(null, 'Nothing to change.');
+    const res = await db.updateItem(kind, siteId, itemId, fields, expectedFrom(body), { password });
     if (res.missing) return gone();
     if (res.duplicate) throw new InvalidField(res.duplicate, DUPLICATE[res.duplicate]);
     if (res.conflict) {
@@ -306,6 +340,18 @@ async function handleItem(request, db, m, siteId, kind, itemId) {
     return (await db.removeItem(kind, siteId, itemId)) ? json({ deleted: itemId }) : gone();
   }
   return json({ error: 'Method not allowed.' }, 405);
+}
+
+// POST /api/sites/:id/services/:itemId/password: the password itself, for
+// Show and Copy on the desk. A POST, so it needs the x-desk header like any
+// change, and no other page can ask for it with the login cookie.
+async function handlePassword(request, db, m, siteId, itemId, env) {
+  if (!itemId || !ID.test(itemId)) return json({ error: 'Not found.' }, 404);
+  if (m !== 'POST') return json({ error: 'Method not allowed.' }, 405);
+  const res = await db.readPassword(siteId, itemId);
+  if (res.missing) return json({ error: 'No such service on this site.' }, 404);
+  if (res.none) return json({ error: 'This service has no password saved.', code: 'no-password' }, 404);
+  return json({ password: await decryptPassword(env.CREDENTIALS_KEY, res.ciphertext) });
 }
 
 export default {

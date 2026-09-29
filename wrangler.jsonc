@@ -26,5 +26,13 @@
   "workers_dev": false,
   "preview_urls": false,
   // Query strings are dropped from logs, so nothing sent in a URL is kept.
-  "observability": { "enabled": true, "redact_query_string": true }
+  "observability": { "enabled": true, "redact_query_string": true },
+  // The client form's emails (src/notify.js): who they come from, and the
+  // rep that Notify rep writes to. Not secrets. The Resend key and the key
+  // passwords are encrypted with are secrets: RESEND_API_KEY and
+  // CREDENTIALS_KEY (README).
+  "vars": {
+    "FORM_EMAIL_FROM": "10XiD <noreply@brandingcentres.com>",
+    "FORM_EMAIL_REP": "paolo@tboxstudio.com"
+  }
 }

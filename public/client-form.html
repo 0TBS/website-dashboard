@@ -69,7 +69,7 @@
 
     <section class="cfsec" aria-labelledby="cf-h-services">
       <h2 id="cf-h-services">Services &amp; accounts</h2>
-      <p class="sub">Pick each account the site runs on. <strong>Never put a password here.</strong> Under login info, say where the login lives, such as “1Password → Acme → GoDaddy”.</p>
+      <p class="sub">Pick each account the site runs on, with its username or email and its password. Passwords are encrypted before they are saved, and only people with the desk key can see them.</p>
       <ol class="cfrows" id="cf-services"></ol>
       <button class="btn" type="button" data-add="services">+ Add service</button>
     </section>
@@ -84,7 +84,7 @@
     <section class="cfsec" aria-labelledby="cf-h-options">
       <h2 id="cf-h-options">Options</h2>
       <div class="cfticks" id="cf-options"></div>
-      <p class="sub cfsmall">Saved with the client. The desk does not send emails yet.</p>
+      <p class="sub cfsmall">Notify rep emails you a summary of the form. Notify client emails the main contact to say their details are in. Passwords are never emailed.</p>
     </section>
 
     <p class="ederr" id="cf-err" role="alert" hidden></p>
@@ -96,6 +96,7 @@
   <section class="empty cfdone" id="cf-done" hidden tabindex="-1">
     <h3 class="emptyh" id="cf-done-h">Saved</h3>
     <p class="emptyp" id="cf-done-p"></p>
+    <p class="emptyp cfmail" id="cf-done-mail" role="status" hidden></p>
     <p class="cfbtns">
       <a class="addbtn" id="cf-open" href="/">Open it on the desk</a>
       <button class="addbtn ghost" type="button" id="cf-again">Fill in another</button>

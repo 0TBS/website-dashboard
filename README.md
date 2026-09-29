@@ -37,7 +37,7 @@ Each site also keeps its details, each with Add, Edit and Remove:
 
 | Section | Holds |
 | --- | --- |
-| Services & accounts | Every account or resource the site uses: its GoDaddy and Cloudflare accounts, its Cloudflare Worker and zone, Backblaze bucket, database, Tag Manager, Analytics, Search Console, Google Ads, Business Profile, reCAPTCHA, Resend, Cal.com, Stripe, WordPress admin and other hosting. Each has its ID or name, a link to its dashboard, which account owns it, and notes. |
+| Services & accounts | Every account or resource the site uses: its GoDaddy and Cloudflare accounts, its Cloudflare Worker and zone, Backblaze bucket, database, Tag Manager, Analytics, Search Console, Google Ads, Business Profile, reCAPTCHA, Resend, Cal.com, Stripe, WordPress admin and other hosting. Each has its ID or name, a link to its dashboard, which account owns it, its password (encrypted, see below) and notes. |
 | Contacts | The client's people: name, role, email, phone and notes. |
 | Domains | Every domain the site uses, and what for (live, staging, images, redirects, old domains), with its registrar, whether its DNS is on Cloudflare, and when it renews. |
 | Job info | One row per URL with work to do, and a tick for each job it needs: Clone, Database / Backblaze B2, SEO / PPC, Live. |
@@ -45,7 +45,7 @@ Each site also keeps its details, each with Add, Edit and Remove:
 | Client form | For a site made from the client form: whether it asked to notify the rep, notify the client, and do a competitor analysis. |
 | History | Every change to the site and its details: when, who (when the desk knows), which field, and what it was before. |
 
-**Never put a password or API key in the desk.** Everyone with the desk key could read it. Write where the login lives instead, such as "1Password → Acme → Cloudflare".
+**A service's password goes in its Password box, and nowhere else.** It is encrypted before it is saved (AES-256-GCM, under the `CREDENTIALS_KEY` Worker secret), so the database, its backups and the Neon console hold only ciphertext. On the desk it shows as dots, with **Show** (for 30 seconds) and **Copy**. Everyone with the desk key can use them. The history says when a password was saved, changed or removed, never what it was, and no email ever contains one. Never put a password or API key in any other field: those are stored as typed.
 
 A site's row can also **Go live**: point its live domain at its staging Worker. The desk checks everything first, saves today's DNS records so the switch can be rolled back, and asks you to confirm. See [Going live from the desk](#going-live-from-the-desk).
 
@@ -58,13 +58,13 @@ A site's row can also **Go live**: point its live domain at its staging Worker. 
 | Contact information: name, email, phone number, business | The site (named after the business), and its first contact, with the role *Main contact*. Name, email and business are required. |
 | Delegate information: name, email, phone number, job position | More contacts, the job position as their role. **+ Add delegate** adds a row; an empty row is skipped. |
 | Live website URL | The site's live domain. |
-| Services & accounts: a service, and its login info | Services: GoDaddy, Cloudflare, Backblaze B2 and every other kind the desk knows. Login info goes in the service's Account and says where the login lives. A line that looks like a password (`password: …`, `pw=…`) is refused. |
+| Services & accounts: a service, its login info and its password | Services: GoDaddy, Cloudflare, Backblaze B2 and every other kind the desk knows. Login info (the username or email) goes in the service's Account. The password is encrypted and saved with the service. A password typed in Login info by mistake (`password: …`, `pw=…`) is refused. |
 | Job info: a URL, with Clone, Database / Backblaze B2, SEO / PPC and Live ticks | The site's job list. **+ Add URL** adds a row. The first row takes the live website URL unless something else is typed there. Any URL ticked for SEO / PPC sets the site's SEO / PPC to *Needed*. |
-| Notify rep (me), Notify client, Competitor analysis | Saved with the site, under Client form. The desk does not send any email yet. |
+| Notify rep (me), Notify client, Competitor analysis | Saved with the site, under Client form. **Notify rep** emails the rep (`FORM_EMAIL_REP`, paolo@tboxstudio.com) a summary of the form with a link to the site. **Notify client** emails the main contact that their details are in, listing the URLs and their work, with replies going to the rep. Both come from `FORM_EMAIL_FROM` (noreply@brandingcentres.com for now, the agency's verified sending domain) through Resend, as plain text, and neither contains a password. |
 
 A client already on the desk can send another form, for something new: every form makes a site of its own.
 
-Everything from one form is saved in one transaction: all of it, or, if anything is refused, none of it. The form then links to the new site on the desk (`/#site=<id>`, which opens that row).
+Everything from one form is saved in one transaction: all of it, or, if anything is refused, none of it. The emails go after the save, so an email that fails never loses the form: the page says which emails were sent, and why any was not (such as `RESEND_API_KEY` not being set). The form then links to the new site on the desk (`/#site=<id>`, which opens that row).
 
 ## How it is built
 
@@ -76,6 +76,7 @@ Everything from one form is saved in one transaction: all of it, or, if anything
   | `sites` | One row per site: the fields in the table above. |
   | `site_services`, `site_contacts`, `site_domains`, `site_jobs` | A site's details, any number of each. They go when the site is deleted. |
   | `client_forms` | For a site made from the client form, its three ticks. It goes when the site is deleted. |
+  | `service_passwords` | A service's password, encrypted: the ciphertext only. It has no history trigger, so the ciphertext never reaches the history; the store writes a line saying only that a password was saved, changed or removed. It goes with its service. |
   | `site_tiktok`, `site_linkedin`, `site_facebook`, `site_x`, `site_instagram` | One table per social media platform: `handle`, `url` (the profile link, once per site), `account` and `notes`. They go when the site is deleted. A new platform needs a new table, so it is a new schema step plus one line in `src/details.js`. |
   | `history` | One row per field changed, and one per row added or removed. The database writes it itself, with a trigger, so no change can skip it. It is kept when the site is deleted. |
   | `golive`, `golive_log`, `golive_checks` | Going live: where each site's go-live stands, every step it took, and the last check. |
@@ -85,6 +86,7 @@ Everything from one form is saved in one transaction: all of it, or, if anything
 - **The schema** is in `src/schema.js` as numbered steps. The Worker runs any it has not run yet the first time it reaches the database, so a deploy needs nothing run by hand. A change to the shape is a new step at the end. A step already on the live database is never edited.
 - **One write at a time** (`src/db.js`): each call is one transaction. Every write takes the same Postgres advisory lock first, so writes still run one after another, as they did in the Durable Object. Going live relies on this: a step reads the row, decides, and writes, and nothing lands in between. Reads take no lock.
 - **`src/sites.js`** is the one place that defines a site record: its fields, what each one may hold, and how input is cleaned. For example, `https://www.Example.com/` becomes `www.example.com`, and a GitHub link becomes `owner/repo`. **`src/details.js`** does the same for services, contacts and domains, and holds the list of service kinds. Adding a kind is one line there.
+- **`src/secrets.js`** encrypts and decrypts service passwords with Web Crypto. **`src/notify.js`** writes the client form's emails and sends them through Resend's API.
 - **`src/client-form.js`** says what the client form may hold, and cleans it with the rules of `sites.js` and `details.js`, so a contact from the form is the same as one added on the desk.
 - **`src/store.js`** is every read and write the Worker makes.
 - **Going live**: `src/golive.js` holds the checks, the switch, the put-back and the live check; `src/golive-routes.js` answers `/api/golive/*`; `src/golive-store.js` is the SQL for the go-live tables. `src/cloudflare.js` is a small client for the Cloudflare API, `src/access.js` checks the Cloudflare Access login with Web Crypto (no library), and `src/budget.js` counts the calls each request makes. None of them needs the Workers runtime, so `npm test` runs whole switches and rollbacks under plain Node against a fake Cloudflare (`test/fake-cloudflare.js`) and a real Postgres running inside the test process (PGlite, `test/pglite.js`).
@@ -137,6 +139,8 @@ The Worker `website-dashboard` runs on the Cloudflare account that holds the 10x
 - **Custom domain:** `website.10xid.com`. Cloudflare created the DNS record and certificate. It overrides the proxied `*.10xid.com` wildcard for this one hostname.
 - **workers.dev and preview URLs:** off. The desk has only one address.
 - **Desk key:** stored as a Worker secret named `DASH_KEY`. It is not a build variable.
+- **Password key:** the Worker secret `CREDENTIALS_KEY`, 32 random bytes in base64. Every service password is encrypted with it. **Keep a copy somewhere safe, such as the agency's password manager: if it is lost or replaced, every saved password is lost with it and has to be entered again.** Without it, the desk refuses to save a password rather than store one in the clear. To set it: `openssl rand -base64 32 | npx wrangler secret put CREDENTIALS_KEY`.
+- **Email:** the Worker secret `RESEND_API_KEY`, a Resend key allowed to send from brandingcentres.com, and the vars `FORM_EMAIL_FROM` and `FORM_EMAIL_REP` in `wrangler.jsonc`. To send from noreply@10xid.com instead, add 10xid.com to Resend (three new records: DKIM at `resend._domainkey`, and MX and SPF on `send.10xid.com`; the Microsoft 365 records are not touched), let it verify, give the key access to it, and change `FORM_EMAIL_FROM`. Without the key, the form saves and says its emails were not sent.
 - **Database:** the Neon connection string, pooled (the `-pooler` host), stored as a Worker secret named `DATABASE_URL`. To change it, copy the new one from the Neon console (project `website-desk`, Connect, Pooled connection) and run `npx wrangler secret put DATABASE_URL`.
 - **Going live:** five more Worker secrets, a Cloudflare API token and a Cloudflare Access application. See [Setting it up](#setting-it-up).
 
@@ -309,9 +313,10 @@ Scripts send `Authorization: Bearer <DASH_KEY>` with every request. The page use
 | POST | `/api/sites/:id/:kind` | the new item | `201 { item }` |
 | PATCH | `/api/sites/:id/:kind/:itemId` | only the fields to change, optionally `expected_updated_at` | `{ item }`, or `409 { code: "conflict", item }` if it changed since that time |
 | DELETE | `/api/sites/:id/:kind/:itemId` | – | `{ deleted: itemId }` |
+| POST | `/api/sites/:id/services/:itemId/password` | – | `{ password }`, decrypted, for Show and Copy; `404 { code: "no-password" }` if none is saved |
 
 | GET | `/api/client-form` | – | `{ choices }`: the service kinds, job ticks, options and row limits the form offers |
-| POST | `/api/client-form` | the form (below) | `201 { site }`; `400 { error, field }`, the field named as a path such as `delegates.1.email` or `jobs.0.url` |
+| POST | `/api/client-form` | the form (below) | `201 { site, emails: [{ who: "rep" \| "client", sent, error? }] }`; `400 { error, field }`, the field named as a path such as `delegates.1.email` or `jobs.0.url` |
 
 `:kind` is `services`, `contacts`, `domains`, `jobs`, or one of the social media platforms: `tiktok`, `linkedin`, `facebook`, `x`, `instagram`.
 | GET | `/api/golive/signin?site=<id>` | – | Where Access sends you back after its login; needs no desk key. `302` to `/#golive=<id>` (`/` if the id is not a site id), or to `/#golive-error=<code>` |
@@ -329,11 +334,11 @@ Field values:
 - `chat_url`: a `claude.ai` link (`claude.ai/code/session_…` is fine; it is stored with `https://`), or `null`. Links anywhere else are refused.
 - `environment`: one line of up to 80 characters, or `null`.
 - `golive` (read only): where the site's go-live stands, or `null` if it never went live from the desk. It says whether there was an error (`has_error`) and what kind (`error_kind`), never its words: those can quote a saved record, so only `/api/golive/:id`, behind Access, has them.
-- A service: `kind` (required; one of `godaddy`, `cloudflare`, `cloudflare_worker`, `cloudflare_zone`, `backblaze_bucket`, `database`, `gtm`, `ga4`, `search_console`, `google_ads`, `business_profile`, `recaptcha`, `resend`, `calcom`, `stripe`, `wordpress`, `hosting`, `other`), `identifier`, `url` (an http or https link), `account` and `notes`.
+- A service: `kind` (required; one of `godaddy`, `cloudflare`, `cloudflare_worker`, `cloudflare_zone`, `backblaze_bucket`, `database`, `gtm`, `ga4`, `search_console`, `google_ads`, `business_profile`, `recaptcha`, `resend`, `calcom`, `stripe`, `wordpress`, `hosting`, `other`), `identifier`, `url` (an http or https link), `account`, `notes`, and `password` (write-only: text saves it encrypted, `null` or `""` removes it, absent leaves it). A service comes back with `has_password`, never the password. Saving a password with no `CREDENTIALS_KEY` answers `503 { code: "passwords-not-set-up" }`.
 - A contact: `name` (required), `role`, `email`, `phone` and `notes`.
 - A domain: `hostname` (required; a domain without a path, once per site), `role` (required; `live`, `staging`, `image`, `redirect`, `old` or `other`), `registrar`, `dns_on_cloudflare` (`true`, `false` or `null`), `renews_on` (`YYYY-MM-DD`) and `notes`.
 - A job: `url` (required; an address such as `acme.com/shop`, once per site), `clone`, `database_b2`, `seo_ppc` and `live` (`true`, `false` or `null`), and `notes`.
-- The client form: `business` (required), `live_url`, `contact: { name, email, phone }` (name and email required), `delegates: [{ name, email, phone, position }]` (up to 20), `services: [{ kind, login }]` (up to 30), `jobs: [{ url, clone, database_b2, seo_ppc, live }]` (up to 50), and `notify_rep`, `notify_client`, `competitor_analysis` (`true` or `false`). Rows left empty are skipped.
+- The client form: `business` (required), `live_url`, `contact: { name, email, phone }` (name and email required), `delegates: [{ name, email, phone, position }]` (up to 20), `services: [{ kind, login, password }]` (up to 30), `jobs: [{ url, clone, database_b2, seo_ppc, live }]` (up to 50), and `notify_rep`, `notify_client`, `competitor_analysis` (`true` or `false`). Rows left empty are skipped.
 - A social media link (`tiktok`, `linkedin`, `facebook`, `x` or `instagram`): `url` (required; on that platform's own domain, such as `tiktok.com`, or `x.com` or `twitter.com` for X; stored as https; once per site), `handle` (one word, the `@` is dropped), `account` and `notes`.
 - Bad input returns `400 { error, field }`, naming the field that failed.
 - If the database cannot be reached, every request that needs it answers `503 { code: "database-unavailable" }`. After five minutes with no visits, Neon's free plan pauses the database. The next request wakes it, which takes up to a second or two.

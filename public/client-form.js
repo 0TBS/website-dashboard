@@ -29,7 +29,8 @@
       html: () => `<div class="edgrid">
         <label class="field"><span>Service</span><select data-k="kind"><option value="">Choose one</option>
           ${choices.service_kinds.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select></label>
-        ${text('login', 'Login info', 120, 'placeholder="Where the login lives, never the password" spellcheck="false"')}</div>`,
+        ${text('login', 'Login info', 120, 'placeholder="Username or email" spellcheck="false"')}
+        ${text('password', 'Password', 500, 'type="password" autocomplete="new-password" spellcheck="false"')}</div>`,
     },
     jobs: {
       what: 'URL', list: $('cf-jobs'),
@@ -112,7 +113,7 @@
   const val = (f) => { const el = form.querySelector(`[data-f="${f}"]`); return el ? el.value.trim() : ''; };
   function rowsOf(kind) {
     return [...ROWS[kind].list.children].map((li) => Object.fromEntries(
-      [...li.querySelectorAll('[data-k]')].map((el) => [el.dataset.k, el.type === 'checkbox' ? el.checked : el.value.trim()])));
+      [...li.querySelectorAll('[data-k]')].map((el) => [el.dataset.k, el.type === 'checkbox' ? el.checked : el.type === 'password' ? el.value : el.value.trim()])));
   }
   function values() {
     const out = {
@@ -150,8 +151,8 @@
     const save = $('cf-save');
     save.disabled = true;
     try {
-      const { site } = await api('POST', '/api/client-form', values());
-      done(site);
+      const { site, emails } = await api('POST', '/api/client-form', values());
+      done(site, emails || []);
     } catch (ex) {
       if (ex instanceof Locked) { lock(ex); return; }
       showErr(ex.message, ex.field);
@@ -160,10 +161,20 @@
     }
   });
 
-  function done(site) {
+  // The save, and then each email the form asked for: sent, or why not.
+  const WHO = { rep: 'the rep', client: 'the client' };
+  function done(site, emails) {
     form.hidden = true;
     $('cf-done-h').textContent = 'Saved';
     $('cf-done-p').textContent = `${site.name} is on the desk as site ${site.id}, with everything from the form.`;
+    const sent = emails.filter((e) => e.sent).map((e) => WHO[e.who]);
+    const failed = emails.filter((e) => !e.sent);
+    $('cf-done-mail').textContent = [
+      sent.length ? `Emailed ${sent.join(' and ')}.` : '',
+      ...failed.map((e) => `The email to ${WHO[e.who]} was not sent: ${e.error}`),
+    ].filter(Boolean).join(' ');
+    $('cf-done-mail').hidden = !emails.length;
+    if (failed.length) $('cf-done-mail').setAttribute('data-bad', ''); else $('cf-done-mail').removeAttribute('data-bad');
     $('cf-open').href = '/#site=' + encodeURIComponent(site.id);
     $('cf-done').hidden = false;
     $('cf-done').focus();

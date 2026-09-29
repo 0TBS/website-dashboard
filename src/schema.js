@@ -287,6 +287,21 @@ export const MIGRATIONS = [
     `CREATE TRIGGER client_forms_history AFTER INSERT OR UPDATE OR DELETE ON client_forms
       FOR EACH ROW EXECUTE FUNCTION desk_history('client_form')`,
   ],
+
+  // 6. A service's password, encrypted (secrets.js): the ciphertext only,
+  // never the password. A table of its own, with no history trigger, so the
+  // ciphertext is never copied into the history either; store.js writes the
+  // history line itself, saying only that a password was set, changed or
+  // removed. It goes with its service.
+  [
+    `CREATE TABLE service_passwords (
+      service_id TEXT PRIMARY KEY REFERENCES site_services (id) ON DELETE CASCADE ON UPDATE CASCADE,
+      site_id    TEXT NOT NULL REFERENCES sites (id) ON DELETE CASCADE ON UPDATE CASCADE,
+      ciphertext TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
+    'CREATE INDEX service_passwords_site ON service_passwords (site_id)',
+  ],
 ];
 
 // Brings the database up to the last step (or to `upTo`, for a test that

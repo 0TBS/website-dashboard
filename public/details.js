@@ -20,12 +20,16 @@
     services: {
       noun: 'service', a: 'a service', title: 'Services & accounts',
       empty: 'No services or accounts listed yet.',
-      hint: 'Never put a password or API key here. Say where the login lives instead.',
+      hint: 'A password goes in the Password box only: it is encrypted before it is saved. Never put one in another field.',
       fields: [
         { name: 'kind', label: 'Kind', type: 'select', choices: 'service_kinds', required: true },
         { name: 'identifier', label: 'ID or name', max: 200, placeholder: 'G-ABC123DEF4, or the bucket’s name' },
         { name: 'url', label: 'Link', max: 300, placeholder: 'dash.cloudflare.com/…', inputmode: 'url' },
-        { name: 'account', label: 'Account', max: 120, placeholder: 'Which login it is under, not the password' },
+        { name: 'account', label: 'Account', max: 120, placeholder: 'The username or email it logs in with' },
+        // Write-only: the dialog never holds the saved password. Left empty
+        // it keeps it; the box below removes it.
+        { name: 'password', label: 'Password', type: 'password', max: 500, placeholder: 'Leave empty to keep the saved one', keep: true },
+        { name: 'password_clear', label: 'Remove the saved password', type: 'checkbox', onlyIf: 'has_password' },
         { name: 'notes', label: 'Notes', type: 'textarea', max: 2000 },
       ],
     },
@@ -222,6 +226,9 @@
     return [KINDS[kind] ? KINDS[kind].platform : kind, where].filter(Boolean).join(' ');
   }
 
+  const pwBtn = (act, word, it, name) =>
+    `<button class="btn" type="button" data-dact="${act}" data-kind="services" data-item="${esc(it.id)}">${word}<span class="sr"> the ${esc(name)} password</span></button>`;
+
   function itemHtml(kind, it, choices) {
     const name = itemName(kind, it, choices);
     let head;
@@ -232,6 +239,8 @@
         mono('ID or name', it.identifier),
         it.url && link('Link', it.url.replace(/^https:\/\//, ''), it.url, `the ${name} link`, true),
         plain('Account', it.account),
+        it.has_password && row('Password', `<span class="val mono" data-pw="${esc(it.id)}">••••••••</span>`,
+          pwBtn('pwshow', 'Show', it, name) + pwBtn('pwcopy', 'Copy', it, name)),
         notes(it.notes),
       ];
     } else if (kind === 'contacts') {
@@ -350,6 +359,11 @@
     const kind = ITEM_KIND[h.item];
     const what = h.item === 'site' ? 'this site' : itemWords(kind, h.item, names.get(nameKey(h.item, h.item_id)) || '');
     let text;
+    if (h.item === 'service' && h.field === 'password') {
+      // Only that it happened: the history never holds a password.
+      const did = h.old_value == null ? 'saved a password for' : h.new_value == null ? 'removed the password for' : 'changed the password for';
+      return `<li><span class="dtwhen">${esc(whenAt(h.at))}</span> · ${who} ${did} ${what}</li>`;
+    }
     if (h.action === 'added' || h.action === 'removed') {
       const row = kind && parse(h.action === 'added' ? h.new_value : h.old_value);
       const name = row ? itemName(kind, row, choices) : '';
@@ -446,6 +460,43 @@
     load(id);
   }
 
+  // ---- a service's password: Show and Copy ask the Worker for it each
+  // time; it is never kept in the page's data. Show puts it back behind the
+  // dots after 30 seconds. ----
+  async function password(btn, id, itemId, act) {
+    const box = grid.querySelector(`[data-dts="${CSS.escape(id)}"] [data-pw="${CSS.escape(itemId)}"]`);
+    if (act === 'pwshow' && btn.dataset.shown) { hidePw(btn, box); return; }
+    btn.disabled = true;
+    let pw;
+    try {
+      pw = (await api('POST', `/api/sites/${enc(id)}/services/${enc(itemId)}/password`)).password;
+    } catch (ex) {
+      if (ex instanceof Locked) { lockDesk(ex); return; }
+      say(id, 'services', 'Could not read the password: ' + ex.message, true);
+      return;
+    } finally {
+      btn.disabled = false;
+    }
+    if (act === 'pwcopy') {
+      try { await navigator.clipboard.writeText(pw); say(id, 'services', 'Password copied.'); } catch {
+        say(id, 'services', 'This browser would not copy it. Use Show instead.', true);
+      }
+      return;
+    }
+    if (!box) return;
+    box.textContent = pw;
+    btn.dataset.shown = '1';
+    btn.firstChild.textContent = 'Hide';
+    clearTimeout(btn._pwt);
+    btn._pwt = setTimeout(() => hidePw(btn, box), 30000);
+  }
+  function hidePw(btn, box) {
+    clearTimeout(btn._pwt);
+    if (box) box.textContent = '••••••••';
+    delete btn.dataset.shown;
+    btn.firstChild.textContent = 'Show';
+  }
+
   // ---- add / edit: the same dialog as a site's, one for each kind ----
   const dialog = document.getElementById('dt-editor');
   const form = document.getElementById('dtform');
@@ -466,6 +517,11 @@
       control = `<select name="${f.name}"${attrs}>${opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>`;
     } else if (f.type === 'textarea') {
       control = `<textarea name="${f.name}" rows="3"${attrs}></textarea>`;
+    } else if (f.type === 'checkbox') {
+      return `<label class="glcheck"><input name="${f.name}" type="checkbox"><span>${esc(f.label)}</span></label>`;
+    } else if (f.type === 'password') {
+      control = `<input name="${f.name}" type="password"${attrs} autocomplete="new-password" spellcheck="false"` +
+        (f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : '') + '>';
     } else {
       control = `<input name="${f.name}" type="${f.type || 'text'}"${attrs} autocomplete="off" spellcheck="false"` +
         (f.inputmode ? ` inputmode="${f.inputmode}"` : '') + (f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : '') + '>';
@@ -479,6 +535,7 @@
     let group = [];
     const flush = () => { if (group.length) out.push(`<div class="edgrid">${group.join('')}</div>`); group = []; };
     for (const f of spec.fields) {
+      if (f.onlyIf && !(item && item[f.onlyIf])) continue;
       const html = fieldHtml(f, choices, item ? item[f.name] : null);
       if (f.group) group.push(html); else { flush(); out.push(html); }
     }
@@ -489,21 +546,27 @@
   function itemToForm(kind, item) {
     const out = {};
     for (const f of KINDS[kind].fields) {
-      const v = item ? item[f.name] : null;
-      out[f.name] = f.flag ? (v === true || v === false ? v : null) : (v == null || v === '' ? null : String(v));
+      const v = item && !f.keep ? item[f.name] : null;
+      out[f.name] = f.type === 'checkbox' ? false
+        : f.flag ? (v === true || v === false ? v : null) : (v == null || v === '' ? null : String(v));
     }
     return out;
   }
   function fillForm(values) {
     for (const [k, v] of Object.entries(values)) {
       const el = form.elements.namedItem(k);
-      if (el) el.value = v === true ? '1' : v === false ? '0' : v == null ? '' : v;
+      if (el && el.type === 'checkbox') el.checked = !!v;
+      else if (el) el.value = v === true ? '1' : v === false ? '0' : v == null ? '' : v;
     }
   }
+  // A password is kept exactly as typed, spaces and all.
   function formValues() {
     const out = {};
     for (const f of KINDS[ed.kind].fields) {
-      const v = form.elements.namedItem(f.name).value.trim();
+      const el = form.elements.namedItem(f.name);
+      if (f.type === 'checkbox') { out[f.name] = !!(el && el.checked); continue; }
+      if (!el) { out[f.name] = null; continue; }
+      const v = f.type === 'password' ? el.value : el.value.trim();
       out[f.name] = f.flag ? (v === '1' ? true : v === '0' ? false : null) : v || null;
     }
     return out;
@@ -557,6 +620,14 @@
       if (!Object.keys(body).length) { dialog.close(); return; }   // nothing was changed
       body.expected_updated_at = ed.stamp;
     }
+    // The password: typed replaces it, the box removes it, and neither
+    // leaves it as it is. Never sent empty on an add.
+    if ('password_clear' in body) {
+      if (body.password_clear && typeof body.password !== 'string') body.password = null;
+      delete body.password_clear;
+    }
+    if ('password' in body && body.password == null && !(item && item.has_password && values.password_clear)) delete body.password;
+    if (item && Object.keys(body).length === 1) { dialog.close(); return; }   // only expected_updated_at is left
     const save = document.getElementById('dt-save');
     save.disabled = true;
     try {
@@ -634,6 +705,7 @@
     else if (act === 'add') openEditor(id, kind, null, b);
     else if (act === 'edit') { const it = find(); if (it) openEditor(id, kind, it, b); }
     else if (act === 'remove') remove(b, id, kind, b.dataset.item);
+    else if (act === 'pwshow' || act === 'pwcopy') password(b, id, b.dataset.item, act);
     else if (act === 'history') { e.histOpen = !e.histOpen; paint(id); }
     else if (act === 'all') {
       e.histAll = true;
