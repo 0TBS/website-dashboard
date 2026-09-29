@@ -231,11 +231,12 @@ export async function goliveDetail(tx, siteId, now) {
 // replaces it. `checks_hash` is checksDigest() of the Cloudflare checks the
 // person read, so a start sees a new warning even when the plan is the same.
 export async function goliveSaveCheck(tx, siteId, { plan_hash, checks_hash = '', include_pair, ready, acks = [], who, now } = {}) {
+  const at = stamp(now);
   await tx.run('DELETE FROM golive_checks WHERE site_id = ?', siteId);
   await tx.run(
     `INSERT INTO golive_checks (site_id, plan_hash, checks_hash, include_pair, ready, acks, checked_by, checked_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    siteId, plan_hash, checks_hash, include_pair ? 1 : 0, ready ? 1 : 0, JSON.stringify(acks), who, stamp(now)
+    siteId, plan_hash, checks_hash, include_pair ? 1 : 0, ready ? 1 : 0, JSON.stringify(acks), who, at
   );
   return goliveLastCheck(tx, siteId);
 }

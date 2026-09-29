@@ -209,14 +209,20 @@ export class Store {
         const known = new Set((await tx.rows(
           'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?', table
         )).map((c) => c.column_name));
+        const rows = dump?.[table] ?? [];
         counts[table] = 0;
-        for (const row of dump?.[table] ?? []) {
+        for (const row of rows) {
           const columns = Object.keys(row).filter((c) => known.has(c));
-          await tx.run(
-            `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')}) ON CONFLICT DO NOTHING`,
+          const landed = await tx.rows(
+            `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})
+             ON CONFLICT DO NOTHING RETURNING 1 AS landed`,
             ...columns.map((c) => row[c])
           );
-          counts[table]++;
+          counts[table] += landed.length;
+        }
+        // Every row the object handed over must be here, or none of them is.
+        if (counts[table] !== rows.length) {
+          throw new Error(`Copied ${counts[table]} of the Durable Object's ${rows.length} ${table} rows; copied nothing.`);
         }
       }
       // The next log entry is numbered after the last one copied.

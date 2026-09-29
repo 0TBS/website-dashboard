@@ -206,6 +206,14 @@ test('the Durable Object is copied across once, exactly, and makes no history', 
   assert.equal((await history(db)).length, 1);
 });
 
+test('a copy that cannot land every row lands none of them', async () => {
+  const { db, store } = await desk();
+  await db.query("INSERT INTO sites (id, name, created_at, updated_at) VALUES ('s2', 'Already here', 'c', 'u')");
+  await assert.rejects(store.importRows(DUMP), /Copied 1 of the Durable Object's 2 sites rows; copied nothing/);
+  assert.equal(await store.hasImported(), false);
+  assert.deepEqual((await db.query('SELECT id FROM sites ORDER BY id')).rows, [{ id: 's2' }]);
+});
+
 test('an empty Durable Object is copied as nothing, and remembered', async () => {
   const { store } = await desk();
   assert.deepEqual(await store.importRows({}), { sites: 0, golive: 0, golive_log: 0, golive_checks: 0 });

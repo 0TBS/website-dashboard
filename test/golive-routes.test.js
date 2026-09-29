@@ -1,4 +1,4 @@
-import { test, beforeEach, mock } from 'node:test';
+import { test, beforeEach, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { freshDatabase } from './pglite.js';
 import { transaction } from '../src/db.js';
@@ -124,6 +124,9 @@ function liveSite(fake, url) {
 // throws rather than quietly read the newer one's rows.
 const shared = await freshDatabase();
 let newest = null;
+
+// PGlite keeps the process alive until it is closed.
+after(() => shared.db.close());
 
 const TABLES = 'sites, golive, golive_log, golive_checks, site_services, site_contacts, site_domains, history, desk_meta';
 
