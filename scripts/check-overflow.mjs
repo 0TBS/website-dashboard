@@ -396,7 +396,8 @@ const DETAILS = {
     { kind: 'ga4', identifier: 'G-' + 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'.repeat(6).slice(0, 198), url: LONG_LINK,
       account: LONG_EMAIL, notes: LONG_LINK + '\n\nThe property was moved from the old Universal Analytics account in 2023.' },
     { kind: 'backblaze_bucket', identifier: 'supercalifragilistic-renovations-and-millwork-media-bucket-2026',
-      account: "The agency's Backblaze account: the login is in the shared vault, never here" },
+      account: "The agency's Backblaze account: the login is in the shared vault, never here",
+      password: 'Unbroken-Forty-Char-Password-For-The-Show-Button-0123456789'.repeat(3) },
     { kind: 'business_profile' },
   ],
   contacts: [
@@ -516,7 +517,9 @@ async function startWorker(databaseUrl) {
   const port = await freePort();
   const dir = mkdtempSync(join(tmpdir(), 'desk-overflow-'));
   const child = spawn('npx', ['wrangler', 'dev', '--port', String(port), '--ip', '127.0.0.1',
-    '--persist-to', dir, '--var', `DASH_KEY:${KEY}`, '--var', 'HTTPS_ONLY:off', '--var', `DATABASE_URL:${databaseUrl}`],
+    '--persist-to', dir, '--var', `DASH_KEY:${KEY}`, '--var', 'HTTPS_ONLY:off', '--var', `DATABASE_URL:${databaseUrl}`,
+    // A throwaway password key, so the stress data can hold a password.
+    '--var', `CREDENTIALS_KEY:${randomBytes(32).toString('base64')}`],
   { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let log = '';
   child.stdout.on('data', (d) => { log += d; });
@@ -638,6 +641,7 @@ async function fillForm(page) {
     for (const k of ['name', 'email', 'phone', 'position']) await put(`delegates.${i}.${k}`, a[k]);
     await page.selectOption(`[data-f="services.${i}.kind"]`, i ? 'backblaze_bucket' : 'godaddy');
     await put(`services.${i}.login`, c.services[0].login);
+    await put(`services.${i}.password`, 'p'.repeat(60));
     await put(`jobs.${i}.url`, c.jobs[0].url);
   }
   for (const box of await page.locator('#cf input[type="checkbox"]').all()) await box.check();
@@ -834,6 +838,17 @@ function detailsStates(base, target, details) {
     const item = fullest(details[kind]);
     if (item) S.push([`details: edit ${kind}`, (p) => dialog(p, 'edit', kind, item)]);
   }
+  // A saved password: shown in full (an unbroken run), and its service's
+  // Edit, which then offers to remove it.
+  const locked = (details.services || []).find((it) => it.has_password);
+  if (locked) {
+    S.push(['details: password shown', async (p) => {
+      await open(p);
+      await box(p).locator(`[data-dact="pwshow"][data-item="${locked.id}"]`).click();
+      await box(p).locator(`[data-pw="${locked.id}"]`).filter({ hasNotText: '••••' }).waitFor();
+    }]);
+    S.push(['details: edit a service with a password', (p) => dialog(p, 'edit', 'services', locked)]);
+  }
   // Social media is one section over five kinds: Add asks for the platform,
   // and an item edits under its own.
   S.push(['details: add social media', (p) => dialog(p, 'add', 'socials')]);
@@ -909,7 +924,11 @@ function statesFor(base, sites, detailsTarget) {
   S.push(['client form: saved', async (p) => {
     await gotoForm(p, base, true);
     await p.route('**/api/client-form', (route) => (route.request().method() === 'POST'
-      ? route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ site: { id: '10000', name: FORM_CLIENT.business } }) })
+      ? route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({
+        site: { id: '10000', name: FORM_CLIENT.business },
+        emails: [{ who: 'rep', sent: true }, { who: 'client', sent: false,
+          error: 'Resend answered 403: The konstantinopoulou-vandenberghe-glass-and-mirror.example.ca domain is not verified. Please, add and verify your domain on https://resend.com/domains' }],
+      }) })
       : route.fallback()));
     await fillForm(p);
     await p.fill('[data-f="business"]', 'A business not on the desk yet');

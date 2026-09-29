@@ -139,6 +139,8 @@ export class Store {
         const rows = await tx.rows(`SELECT * FROM ${spec.table} WHERE site_id = ? ORDER BY ${spec.order}`, siteId);
         out[kind] = rows.map((r) => itemJson(kind, r));
       }
+      const saved = new Set((await tx.rows('SELECT service_id FROM service_passwords WHERE site_id = ?', siteId)).map((r) => r.service_id));
+      for (const s of out.services) s.has_password = saved.has(s.id);
       out.client_form = clientFormJson(await tx.row('SELECT * FROM client_forms WHERE site_id = ?', siteId));
       out.history = await tx.rows(
         `SELECT id, at, who, item, item_id, action, field, old_value, new_value
@@ -150,32 +152,52 @@ export class Store {
   }
 
   // → { item } · { missing: true } (no such site) · { duplicate: field }.
-  createItem(kind, siteId, fields) {
+  // `password`, for a service, is the ciphertext from secrets.js, saved with
+  // it in the same transaction.
+  createItem(kind, siteId, fields, { password = null } = {}) {
     const spec = ITEMS[kind];
     return this.#write(async (tx) => {
       if (!(await tx.row('SELECT id FROM sites WHERE id = ?', siteId))) return { missing: true };
       if (spec.unique && await taken(tx, spec, siteId, fields[spec.unique])) return { duplicate: spec.unique };
-      return { item: await insertItem(tx, kind, siteId, fields) };
+      const item = await insertItem(tx, kind, siteId, fields);
+      if (kind === 'services' && password) await savePassword(tx, siteId, item.id, password);
+      return { item: await readItem(tx, kind, siteId, item.id) };
     });
   }
 
   // → { item } · { missing: true } · { conflict: true, item } · { duplicate: field },
-  // with the same stale-edit check as update().
-  updateItem(kind, siteId, itemId, fields, expected) {
+  // with the same stale-edit check as update(). `password`, for a service:
+  // undefined leaves it as it is, null removes it, a ciphertext replaces it.
+  // A password change counts as a change to the service, so it moves its
+  // updated_at like any other.
+  updateItem(kind, siteId, itemId, fields, expected, { password } = {}) {
     const spec = ITEMS[kind];
     return this.#write(async (tx) => {
       const current = await readItem(tx, kind, siteId, itemId);
       if (!current) return { missing: true };
       if (expected && current.updated_at !== expected) return { conflict: true, item: current };
       const keys = Object.keys(fields).filter((k) => k in spec.fields);
-      if (!keys.length) return { item: current };
+      const pw = kind === 'services' && password !== undefined && (password !== null || current.has_password);
+      if (!keys.length && !pw) return { item: current };
       const u = spec.unique;
       if (u && u in fields && fields[u] !== current[u] && await taken(tx, spec, siteId, fields[u])) return { duplicate: u };
       await tx.run(
-        `UPDATE ${spec.table} SET ${keys.map((k) => k + ' = ?').join(', ')}, updated_at = ? WHERE id = ? AND site_id = ?`,
+        `UPDATE ${spec.table} SET ${keys.map((k) => k + ' = ?, ').join('')}updated_at = ? WHERE id = ? AND site_id = ?`,
         ...keys.map((k) => fields[k]), new Date().toISOString(), itemId, siteId
       );
+      if (pw) await (password ? savePassword(tx, siteId, itemId, password) : dropPassword(tx, siteId, itemId));
       return { item: await readItem(tx, kind, siteId, itemId) };
+    });
+  }
+
+  // A service's password as stored (ciphertext), for the Worker to decrypt
+  // when someone asks to see it. → { ciphertext } · { missing: true } (no
+  // such service) · { none: true } (no password saved).
+  readPassword(siteId, serviceId) {
+    return this.#read(async (tx) => {
+      if (!(await tx.row('SELECT id FROM site_services WHERE id = ? AND site_id = ?', serviceId, siteId))) return { missing: true };
+      const row = await tx.row('SELECT ciphertext FROM service_passwords WHERE service_id = ?', serviceId);
+      return row ? { ciphertext: row.ciphertext } : { none: true };
     });
   }
 
@@ -202,7 +224,10 @@ export class Store {
         id, ...values, now, now
       );
       for (const c of form.contacts) await insertItem(tx, 'contacts', id, c);
-      for (const s of form.services) await insertItem(tx, 'services', id, s);
+      for (const { password, ...s } of form.services) {
+        const item = await insertItem(tx, 'services', id, s);
+        if (password) await savePassword(tx, id, item.id, password);
+      }
       for (const j of form.jobs) await insertItem(tx, 'jobs', id, j);
       const keys = OPTIONS.map(([k]) => k);
       await tx.run(
@@ -296,9 +321,40 @@ function clientFormJson(row) {
   return out;
 }
 
+// A service says whether it has a password (has_password), never what it is.
 async function readItem(tx, kind, siteId, id) {
   const row = await tx.row(`SELECT * FROM ${ITEMS[kind].table} WHERE id = ? AND site_id = ?`, id, siteId);
-  return row ? itemJson(kind, row) : null;
+  if (!row) return null;
+  const item = itemJson(kind, row);
+  if (kind === 'services') item.has_password = !!(await tx.row('SELECT 1 AS y FROM service_passwords WHERE service_id = ?', id));
+  return item;
+}
+
+// A password's history line, written here because the table has no trigger
+// (schema.js, step 6): who, which service, and that it was set, changed or
+// removed. Never the password, and never the ciphertext.
+const HIDDEN = '(hidden)';
+async function passwordHistory(tx, siteId, serviceId, before, after) {
+  await tx.run(
+    `INSERT INTO history (who, site_id, item, item_id, action, field, old_value, new_value)
+     VALUES (NULLIF(current_setting('desk.who', true), ''), ?, 'service', ?, 'changed', 'password', ?, ?)`,
+    siteId, serviceId, before ? HIDDEN : null, after ? HIDDEN : null
+  );
+}
+
+async function savePassword(tx, siteId, serviceId, ciphertext) {
+  const had = await tx.row('SELECT 1 AS y FROM service_passwords WHERE service_id = ?', serviceId);
+  await tx.run(
+    `INSERT INTO service_passwords (service_id, site_id, ciphertext, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (service_id) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = EXCLUDED.updated_at`,
+    serviceId, siteId, ciphertext, new Date().toISOString()
+  );
+  await passwordHistory(tx, siteId, serviceId, !!had, true);
+}
+
+async function dropPassword(tx, siteId, serviceId) {
+  const gone = await tx.rows('DELETE FROM service_passwords WHERE service_id = ? RETURNING 1 AS y', serviceId);
+  if (gone.length) await passwordHistory(tx, siteId, serviceId, true, false);
 }
 
 // A domain, a job's URL, or a social media link, is listed once per site.

@@ -22,3 +22,12 @@ DATABASE_URL=postgres://localhost/desk_dev
 # ACCESS_AUD=
 # Who may go live: email addresses, separated by commas or spaces:
 # GOLIVE_EMAILS=
+
+# Passwords on services are encrypted with this key (src/secrets.js): 32
+# random bytes, base64, such as the output of `openssl rand -base64 32`. Use a
+# key of your own locally, never the live one. Without it, saving a password
+# is refused.
+# CREDENTIALS_KEY=
+# The client form's emails go through Resend. Without a key the form still
+# saves, and says the emails were not sent.
+# RESEND_API_KEY=

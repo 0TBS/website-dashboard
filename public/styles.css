@@ -454,6 +454,8 @@ a.addbtn{display:inline-block;text-decoration:none}
 .dtkv .arow{border-bottom:0;padding:3px 0}
 .dtkv .arow.dttop{align-items:start}
 .dtnotes{font-size:13px}
+/* A shown password keeps its spaces: they are part of it. */
+.dtkv [data-pw]{white-space:pre-wrap;overflow-wrap:anywhere}
 .dtdate{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;min-width:0}
 .dtdate>*{min-width:0}
 .dtdate .pill{font-size:11.5px}
@@ -507,6 +509,8 @@ a.addbtn{display:inline-block;text-decoration:none}
 .cf .addbtn{font-size:14.5px;padding:10px 20px}
 .cf .addbtn:disabled{opacity:.5;cursor:default}
 .cfdone{margin-top:22px}
+.cfmail{margin-top:8px}
+.cfmail[data-bad]{color:var(--bad);font-weight:600}
 .cfdone:focus{outline:none}
 .cfbtns{margin:14px 0 0;display:flex;flex-wrap:wrap;gap:8px}
 .cfbtns .addbtn{margin-top:0}
