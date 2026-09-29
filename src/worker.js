@@ -13,7 +13,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { cleanSite, InvalidField } from './sites.js';
-import { cleanItem, KINDS, CHOICES } from './details.js';
+import { cleanItem, KINDS, ITEMS, CHOICES } from './details.js';
 import { sessionToken, cookieValues, sessionCookie, clearCookie } from './session.js';
 import { json } from './answers.js';
 import { pgSession } from './db.js';
@@ -201,7 +201,7 @@ function expectedFrom(body) {
 
 // /api/sites and /api/sites/:id, then a site's details:
 //   GET    /api/sites/:id/details        services, contacts, domains and history
-//   POST   /api/sites/:id/:kind          add a service, contact or domain
+//   POST   /api/sites/:id/:kind          add a service, contact, domain or social link
 //   PATCH  /api/sites/:id/:kind/:itemId  change one
 //   DELETE /api/sites/:id/:kind/:itemId  remove one
 async function handleSites(request, db, parts) {
@@ -251,11 +251,14 @@ async function handleSites(request, db, parts) {
   }
 }
 
-const DUPLICATE = { hostname: 'That domain is already listed for this site.' };
+const DUPLICATE = {
+  hostname: 'That domain is already listed for this site.',
+  url: 'That link is already listed for this site.',
+};
 
 async function handleItem(request, db, m, siteId, kind, itemId) {
   if (!KINDS.includes(kind) || (itemId && !ID.test(itemId))) return json({ error: 'Not found.' }, 404);
-  const gone = () => json({ error: 'No such ' + kind.replace(/s$/, '') + ' on this site.' }, 404);
+  const gone = () => json({ error: 'No such ' + ITEMS[kind].noun + ' on this site.' }, 404);
 
   if (!itemId && m === 'POST') {
     const res = await db.createItem(kind, siteId, cleanItem(kind, await readBody(request), { creating: true }));

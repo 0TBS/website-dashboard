@@ -1,4 +1,4 @@
-// A site's services and accounts, contacts, domains and history, shown in
+// A site's services and accounts, contacts, domains, social media and history, shown in
 // its opened row. Read from /api/sites/:id/details each time the row opens,
 // and again after every change made here, so the history is always current.
 //
@@ -52,8 +52,35 @@
       ],
     },
   };
-  const ORDER = ['services', 'contacts', 'domains'];
-  const ITEM_KIND = { service: 'services', contact: 'contacts', domain: 'domains' };
+
+  // Each social media platform is a kind of its own, with its own table on
+  // the Worker, and they are shown together under one section. Adding one
+  // asks for the platform first (KINDS.socials); an item edits under its
+  // platform, which does not change.
+  const SOCIAL = [['tiktok', 'TikTok'], ['linkedin', 'LinkedIn'], ['facebook', 'Facebook'], ['x', 'X'], ['instagram', 'Instagram']];
+  const SOCIAL_FIELDS = [
+    { name: 'url', label: 'Link', max: 300, required: true, placeholder: 'instagram.com/acme', inputmode: 'url' },
+    { name: 'handle', label: 'Handle', max: 100, placeholder: '@acme', group: 1 },
+    { name: 'account', label: 'Account', max: 120, placeholder: 'Which login it is under', group: 1 },
+    { name: 'notes', label: 'Notes', type: 'textarea', max: 2000 },
+  ];
+  const SOCIAL_HINT = 'Never put a password here. Say where the login lives instead.';
+  for (const [platform, name] of SOCIAL) {
+    KINDS[platform] = { noun: name + ' link', a: 'a ' + name + ' link', platform: name, section: 'socials', hint: SOCIAL_HINT, fields: SOCIAL_FIELDS };
+  }
+  KINDS.socials = {
+    noun: 'social media link', a: 'a social media link', title: 'Social media',
+    empty: 'No social media links yet.', hint: SOCIAL_HINT, kinds: SOCIAL.map(([platform]) => platform),
+    fields: [{ name: 'platform', label: 'Platform', type: 'select', choices: 'social_platforms', required: true }, ...SOCIAL_FIELDS],
+  };
+  const ORDER = ['services', 'contacts', 'domains', 'socials'];
+  const ITEM_KIND = {
+    service: 'services', contact: 'contacts', domain: 'domains',
+    ...Object.fromEntries(SOCIAL.map(([platform]) => [platform, platform])),
+  };
+  // Every kind that has items, and the section each is shown in.
+  const ITEM_KINDS = Object.values(ITEM_KIND);
+  const sectionOf = (kind) => (KINDS[kind] && KINDS[kind].section) || kind;
   const HISTORY_FIRST = 20;
   const HISTORY_LIMIT = 200;   // the most the Worker sends
   const SOON = 30;             // a renewal this many days away or less is flagged
@@ -110,16 +137,17 @@
   function inner(id, e) {
     if (!e) return '';
     const err = e.err && `<p class="dtnote" data-bad role="alert">${esc(e.data
-      ? 'Could not refresh the services, contacts and domains: ' + e.err
-      : 'Could not load the services, contacts and domains: ' + e.err)}
+      ? 'Could not refresh this site’s details: ' + e.err
+      : 'Could not load this site’s details: ' + e.err)}
       <button class="linkbtn" type="button" data-dact="retry">Try again</button></p>`;
-    if (!e.data) return err || '<p class="dtnote" role="status">Loading services, contacts and domains…</p>';
+    if (!e.data) return err || '<p class="dtnote" role="status">Loading services, contacts, domains and social media…</p>';
     return (err || '') + ORDER.map((kind) => sectionHtml(id, e, kind)).join('') + historyHtml(id, e);
   }
 
   function sectionHtml(id, e, kind) {
     const spec = KINDS[kind];
-    const items = Array.isArray(e.data[kind]) ? e.data[kind] : [];
+    // [kind, item] pairs: a section can show several kinds (Social media).
+    const items = (spec.kinds || [kind]).flatMap((k) => (Array.isArray(e.data[k]) ? e.data[k] : []).map((it) => [k, it]));
     const s = byId(id);
     const hid = `dt-${kind}-${id}`;
     const [said, bad] = e.say[kind] || ['', false];
@@ -129,7 +157,7 @@
       ${spec.hint ? `<p class="dthint">${esc(spec.hint)}</p>` : ''}
       <p class="dtsay" role="status" data-say="${kind}"${bad ? ' data-bad' : ''}>${esc(said)}</p>
       ${items.length
-        ? `<ul class="dtlist">${items.map((it) => itemHtml(kind, it, e.data.choices || {})).join('')}</ul>`
+        ? `<ul class="dtlist">${items.map(([k, it]) => itemHtml(k, it, e.data.choices || {})).join('')}</ul>`
         : `<p class="dtnone">${esc(spec.empty)}</p>`}
     </section>`;
   }
@@ -171,7 +199,9 @@
     if (!it) return '';
     if (kind === 'services') return [labelOf(choices.service_kinds, it.kind), it.identifier].filter(Boolean).join(' ');
     if (kind === 'contacts') return it.name || '';
-    return it.hostname || '';
+    if (kind === 'domains') return it.hostname || '';
+    const where = it.handle ? '@' + it.handle : (it.url || '').replace(/^https:\/\/(www\.)?/, '');
+    return [KINDS[kind] ? KINDS[kind].platform : kind, where].filter(Boolean).join(' ');
   }
 
   function itemHtml(kind, it, choices) {
@@ -191,6 +221,13 @@
       rows = [
         it.email && link('Email', it.email, 'mailto:' + it.email, `${it.name}’s email address`),
         it.phone && link('Phone', it.phone, telHref(it.phone), `${it.name}’s phone number`),
+        notes(it.notes),
+      ];
+    } else if (KINDS[kind].section === 'socials') {
+      head = `<p class="dtt">${esc(KINDS[kind].platform)}${it.handle ? ` <span class="dtsub">@${esc(it.handle)}</span>` : ''}</p>`;
+      rows = [
+        link('Link', it.url.replace(/^https:\/\//, ''), it.url, `the ${name} link`, true),
+        plain('Account', it.account),
         notes(it.notes),
       ];
     } else {
@@ -225,7 +262,7 @@
       const row = kind && h.action !== 'changed' && parse(h.action === 'added' ? h.new_value : h.old_value);
       if (row && !names.has(h.item_id)) names.set(h.item_id, itemName(kind, row, choices));
     }
-    for (const kind of ORDER) for (const it of data[kind] || []) names.set(it.id, itemName(kind, it, choices));
+    for (const kind of ITEM_KINDS) for (const it of data[kind] || []) names.set(it.id, itemName(kind, it, choices));
     return names;
   }
   function parse(text) {
@@ -255,17 +292,23 @@
   }
   const val = (t) => (t == null ? '<span class="none">not set</span>' : `<span class="dtval">${esc(clip(t))}</span>`);
 
+  // "service G-ABC", or "Instagram link @acme" rather than "instagram Instagram @acme".
+  function itemWords(kind, item, name) {
+    const platform = KINDS[kind] && KINDS[kind].platform;
+    const noun = platform ? KINDS[kind].noun : item;
+    const rest = platform && name.startsWith(platform + ' ') ? name.slice(platform.length + 1) : name;
+    return esc(noun) + (rest ? ` <span class="dtval">${esc(clip(rest))}</span>` : '');
+  }
+
   function historyLine(h, names, choices) {
     const who = esc(h.who || 'Someone');
     const kind = ITEM_KIND[h.item];
-    const what = h.item === 'site' ? 'this site'
-      : `${h.item} <span class="dtval">${esc(clip(names.get(h.item_id) || ''))}</span>`;
+    const what = h.item === 'site' ? 'this site' : itemWords(kind, h.item, names.get(h.item_id) || '');
     let text;
     if (h.action === 'added' || h.action === 'removed') {
       const row = kind && parse(h.action === 'added' ? h.new_value : h.old_value);
       const name = row ? itemName(kind, row, choices) : '';
-      text = h.item === 'site' ? `${who} ${h.action} this site`
-        : `${who} ${h.action} ${esc(h.item)}${name ? ` <span class="dtval">${esc(clip(name))}</span>` : ''}`;
+      text = h.item === 'site' ? `${who} ${h.action} this site` : `${who} ${h.action} ${itemWords(kind, h.item, name)}`;
     } else {
       const from = valueText(h.item, h.field, h.old_value, choices);
       const to = valueText(h.item, h.field, h.new_value, choices);
@@ -346,13 +389,13 @@
     btn.disabled = true;
     try {
       await api('DELETE', `/api/sites/${enc(id)}/${kind}/${enc(itemId)}`);
-      say(id, kind, 'Removed.');
+      say(id, sectionOf(kind), 'Removed.');
     } catch (ex) {
       if (ex instanceof Locked) { lockDesk(ex); return; }
       btn.disabled = false;
       btn.removeAttribute('data-armed');
       btn.innerHTML = btn._label;
-      say(id, kind, 'Not removed: ' + ex.message, true);
+      say(id, sectionOf(kind), 'Not removed: ' + ex.message, true);
       if (ex.status !== 404) return;   // gone already: the list below catches up
     }
     load(id);
@@ -433,8 +476,10 @@
     const spec = KINDS[kind];
     const choices = (e && e.data && e.data.choices) || {};
     Object.assign(ed, { id, kind, item: item || null, opener, base: itemToForm(kind, item), stamp: item ? item.updated_at : null });
+    // "Edit TikTok link @acme", not "Edit TikTok link TikTok @acme".
+    const called = spec.platform ? itemName(kind, item, choices).slice(spec.platform.length + 1) : itemName(kind, item, choices);
     document.getElementById('dt-title').textContent = item
-      ? `Edit ${spec.noun} ${itemName(kind, item, choices)}` : `Add ${spec.a}`;
+      ? `Edit ${spec.noun}${called ? ' ' + called : ''}` : `Add ${spec.a}`;
     const hint = document.getElementById('dt-hint');
     hint.textContent = spec.hint || '';
     hint.hidden = !spec.hint;
@@ -449,11 +494,17 @@
     ev.preventDefault();
     form.querySelectorAll('[aria-invalid]').forEach((el) => el.removeAttribute('aria-invalid'));
     errEl.hidden = true;
-    const { id, kind, item } = ed;
+    const { id, item } = ed;
+    let { kind } = ed;
     const spec = KINDS[kind];
     const values = formValues();
     const missing = spec.fields.find((f) => f.required && values[f.name] == null);
     if (missing) { showErr(missing.label + ' is required.', missing.name); return; }
+    // A new social media link goes to its platform's own table.
+    if (kind === 'socials') {
+      kind = values.platform;
+      delete values.platform;
+    }
     let body = values;
     if (item) {
       body = {};
@@ -471,7 +522,7 @@
       ed.opener = null;
       ed.focus = focusKey('edit', kind, res.item && res.item.id);
       dialog.close();
-      say(id, kind, item ? 'Saved.' : 'Added.');
+      say(id, sectionOf(kind), item ? 'Saved.' : 'Added.');
       load(id);
     } catch (ex) {
       if (ex instanceof Locked) { lockDesk(ex); return; }
@@ -517,7 +568,7 @@
   dialog.addEventListener('close', () => {
     const box = ed.id && grid.querySelector(`[data-dts="${CSS.escape(ed.id)}"]`);
     const back = ed.opener && ed.opener.isConnected ? ed.opener
-      : box && ((ed.focus && box.querySelector(ed.focus)) || box.querySelector(focusKey('add', ed.kind)));
+      : box && ((ed.focus && box.querySelector(ed.focus)) || box.querySelector(focusKey('add', sectionOf(ed.kind))));
     // paint() keeps it there when the list is drawn again after a save.
     if (back) back.focus();
     ed.focus = null;

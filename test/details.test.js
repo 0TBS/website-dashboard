@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  cleanItem, itemJson, normalizeUrl, normalizeEmail, normalizePhone, normalizeHostname, normalizeDate,
-  SERVICE_KINDS, DOMAIN_ROLES, KINDS,
+  cleanItem, itemJson, normalizeUrl, normalizeEmail, normalizePhone, normalizeHostname, normalizeDate, normalizeHandle,
+  SERVICE_KINDS, DOMAIN_ROLES, SOCIAL_PLATFORMS, KINDS, CHOICES,
 } from '../src/details.js';
 import { InvalidField } from '../src/sites.js';
 
@@ -67,5 +67,35 @@ test('the error names the field and says what is wrong in plain words', () => {
     assert.equal(e.field, 'url');
     assert.equal(e.message, 'Link is not a link.');
   }
-  assert.deepEqual(KINDS, ['services', 'contacts', 'domains']);
+  assert.deepEqual(KINDS, ['services', 'contacts', 'domains', 'tiktok', 'linkedin', 'facebook', 'x', 'instagram']);
+});
+
+test('each social platform takes only its own profile links, kept as https', () => {
+  const ok = {
+    tiktok: 'tiktok.com/@acme', linkedin: 'https://www.linkedin.com/company/acme/', facebook: 'http://m.facebook.com/acme',
+    x: 'twitter.com/acme', instagram: 'instagram.com/acme',
+  };
+  for (const [platform, url] of Object.entries(ok)) {
+    assert.match(cleanItem(platform, { url }, { creating: true }).url, /^https:\/\//, platform);
+  }
+  assert.equal(cleanItem('x', { url: 'x.com/acme' }).url, 'https://x.com/acme');
+  assert.equal(cleanItem('facebook', { url: 'fb.me/acme' }).url, 'https://fb.me/acme');
+  for (const [platform, bad] of [['tiktok', 'instagram.com/acme'], ['x', 'notx.com/acme'], ['linkedin', 'linkedin.com.evil.io/a'],
+    ['instagram', 'javascript:alert(1)']]) {
+    assert.throws(() => cleanItem(platform, { url: bad }), (e) => e.field === 'url', platform + ' ' + bad);
+  }
+  assert.throws(() => cleanItem('tiktok', { url: 'instagram.com/a' }), /Link should be a TikTok link, on tiktok.com/);
+});
+
+test('a social link is required, a handle loses its @', () => {
+  assert.throws(() => cleanItem('instagram', { handle: 'acme' }, { creating: true }), /Link is required/);
+  assert.equal(normalizeHandle(' @@acme.ca '), 'acme.ca');
+  assert.equal(normalizeHandle(''), null);
+  assert.throws(() => normalizeHandle('acme glass'), /one word/);
+  assert.throws(() => normalizeHandle('@'), /one word/);
+});
+
+test('the page is told the platforms, in order', () => {
+  assert.deepEqual(CHOICES.social_platforms, SOCIAL_PLATFORMS.map(([v, l]) => [v, l]));
+  assert.deepEqual(CHOICES.social_platforms.map(([, l]) => l), ['TikTok', 'LinkedIn', 'Facebook', 'X', 'Instagram']);
 });

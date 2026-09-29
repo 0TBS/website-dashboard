@@ -132,6 +132,32 @@ test('a domain is listed once per site', async () => {
   assert.equal((await store.updateItem('domains', a.id, item.id, { hostname: 'acme.com', notes: 'same host' }, null)).item.notes, 'same host');
 });
 
+test('each platform has its own table, and a link is listed once per site', async () => {
+  const { db, store } = await desk();
+  const a = await store.create({ name: 'Acme' });
+  const b = await store.create({ name: 'Beta' });
+  for (const [platform, url] of [['tiktok', 'https://tiktok.com/@acme'], ['linkedin', 'https://linkedin.com/company/acme'],
+    ['facebook', 'https://facebook.com/acme'], ['x', 'https://x.com/acme'], ['instagram', 'https://instagram.com/acme']]) {
+    const { item } = await store.createItem(platform, a.id, { url, handle: 'acme' });
+    assert.equal(item.url, url);
+    const rows = (await db.query(`SELECT url FROM site_${platform}`)).rows;
+    assert.deepEqual(rows, [{ url }], platform + ' is in its own table');
+  }
+  assert.deepEqual(await store.createItem('x', a.id, { url: 'https://x.com/acme' }), { duplicate: 'url' });
+  assert.ok((await store.createItem('x', b.id, { url: 'https://x.com/acme' })).item, 'another site may list it');
+  const { item: second } = await store.createItem('x', a.id, { url: 'https://x.com/acme_help' });
+  assert.deepEqual(await store.updateItem('x', a.id, second.id, { url: 'https://x.com/acme' }, null), { duplicate: 'url' });
+
+  const details = await store.details(a.id);
+  for (const p of ['tiktok', 'linkedin', 'facebook', 'instagram']) assert.equal(details[p].length, 1, p);
+  assert.equal(details.x.length, 2);
+  const added = (await history(db)).filter((h) => h.action === 'added' && h.item !== 'site').map((h) => h.item);
+  assert.deepEqual(added, ['tiktok', 'linkedin', 'facebook', 'x', 'instagram', 'x', 'x']);
+
+  assert.equal(await store.remove(a.id), true);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM site_x')).rows[0].n, 1, 'only the other site\'s link is left');
+});
+
 test('deleting a site takes its details with it, and the history keeps them', async () => {
   const { db, store } = await desk();
   const site = await store.create({ name: 'Acme' });

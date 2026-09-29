@@ -198,6 +198,27 @@ export const MIGRATIONS = [
     `CREATE TRIGGER site_domains_history AFTER INSERT OR UPDATE OR DELETE ON site_domains
       FOR EACH ROW EXECUTE FUNCTION desk_history('domain')`,
   ],
+
+  // 3. A table for each social media platform: the site's handle there, its
+  // profile link, whose login it is under, and notes. The five names are
+  // written out, not read from details.js: a step never changes once it has
+  // run, and a new platform is a step of its own.
+  ['tiktok', 'linkedin', 'facebook', 'x', 'instagram'].flatMap((platform) => [
+    `CREATE TABLE site_${platform} (
+      id         TEXT PRIMARY KEY,
+      site_id    TEXT NOT NULL REFERENCES sites (id) ON DELETE CASCADE,
+      handle     TEXT,
+      url        TEXT NOT NULL,
+      account    TEXT,
+      notes      TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (site_id, url)
+    )`,
+    `CREATE INDEX site_${platform}_site ON site_${platform} (site_id)`,
+    `CREATE TRIGGER site_${platform}_history AFTER INSERT OR UPDATE OR DELETE ON site_${platform}
+      FOR EACH ROW EXECUTE FUNCTION desk_history('${platform}')`,
+  ]),
 ];
 
 // Brings the database up to the last step. Safe to call from every request

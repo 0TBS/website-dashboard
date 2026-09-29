@@ -1,5 +1,6 @@
 // Everything about a site beyond its one row in `sites`: the services and
-// accounts it uses, the client's people, and its domains in detail. A site
+// accounts it uses, the client's people, its domains in detail, and its
+// social media accounts. A site
 // can have any number of each, so each is a table of its own (schema.js).
 // Like sites.js, this is the one place that says what each field may hold,
 // and the Worker, the page (through /api/sites/:id/details) and the tests all
@@ -42,7 +43,18 @@ export const DOMAIN_ROLES = [
   ['other', 'Other'],
 ];
 
-const TEXT = { short: 120, identifier: 200, notes: 2000, registrar: 80, phone: 40 };
+// The social media platforms. Each has a table of its own (schema.js), so a
+// new platform is a line here and a new migration step, not a line alone.
+// The third entry is the domains its profile links live on.
+export const SOCIAL_PLATFORMS = [
+  ['tiktok', 'TikTok', ['tiktok.com']],
+  ['linkedin', 'LinkedIn', ['linkedin.com']],
+  ['facebook', 'Facebook', ['facebook.com', 'fb.com', 'fb.me']],
+  ['x', 'X', ['x.com', 'twitter.com']],
+  ['instagram', 'Instagram', ['instagram.com', 'instagr.am']],
+];
+
+const TEXT = { short: 120, identifier: 200, notes: 2000, registrar: 80, phone: 40, handle: 100 };
 const URL_LIMIT = 300;
 
 // "https://dash.cloudflare.com/…" or "dash.cloudflare.com/…": kept as a full
@@ -82,6 +94,30 @@ export function normalizePhone(raw) {
   return s.replace(/\s+/g, ' ');
 }
 
+// "@acme", " acme " -> "acme": the name on the platform, without its @.
+export function normalizeHandle(raw) {
+  const s = normalizeText(raw, TEXT.handle);
+  if (s === null) return null;
+  const out = s.replace(/^@+/, '');
+  if (!out || /\s/.test(out)) throw new Error('should be one word, like @acme');
+  return out;
+}
+
+// A profile link, on the platform's own domains, always https.
+export function profileUrl(label, domains) {
+  return (raw) => {
+    const s = normalizeUrl(raw);
+    if (s === null) return null;
+    const url = new URL(s);
+    const host = url.hostname.toLowerCase();
+    if (!domains.some((d) => host === d || host.endsWith('.' + d))) {
+      throw new Error('should be a ' + label + ' link, on ' + domains.join(' or '));
+    }
+    url.protocol = 'https:';
+    return url.toString();
+  };
+}
+
 // A domain's hostname alone: no path, unlike a staging address.
 export function normalizeHostname(raw) {
   const s = normalizeAddress(raw);
@@ -113,6 +149,7 @@ export const ITEMS = {
   services: {
     table: 'site_services',
     item: 'service',
+    noun: 'service',
     fields: {
       kind: ['Kind', oneOf(SERVICE_KINDS)],
       identifier: ['ID or name', text(TEXT.identifier)],
@@ -127,6 +164,7 @@ export const ITEMS = {
   contacts: {
     table: 'site_contacts',
     item: 'contact',
+    noun: 'contact',
     fields: {
       name: ['Name', text(TEXT.short)],
       role: ['Role', text(TEXT.short)],
@@ -141,6 +179,7 @@ export const ITEMS = {
   domains: {
     table: 'site_domains',
     item: 'domain',
+    noun: 'domain',
     fields: {
       hostname: ['Domain', normalizeHostname],
       role: ['Used as', oneOf(DOMAIN_ROLES)],
@@ -152,7 +191,26 @@ export const ITEMS = {
     required: ['hostname', 'role'],
     flags: ['dns_on_cloudflare'],
     order: 'hostname',
+    unique: 'hostname',
   },
+  // One kind per social media platform, each with its own table. The page
+  // shows them together, under Social media (`group`).
+  ...Object.fromEntries(SOCIAL_PLATFORMS.map(([platform, label, domains]) => [platform, {
+    table: 'site_' + platform,
+    item: platform,
+    noun: label + ' link',
+    group: 'socials',
+    fields: {
+      handle: ['Handle', normalizeHandle],
+      url: ['Link', profileUrl(label, domains)],
+      account: ['Account', text(TEXT.short)],
+      notes: ['Notes', text(TEXT.notes)],
+    },
+    required: ['url'],
+    flags: [],
+    order: 'created_at',
+    unique: 'url',
+  }])),
 };
 
 export const KINDS = Object.keys(ITEMS);
@@ -187,4 +245,8 @@ export function itemJson(kind, row) {
 }
 
 // What the page needs to draw the forms, so its lists never drift from these.
-export const CHOICES = { service_kinds: SERVICE_KINDS, domain_roles: DOMAIN_ROLES };
+export const CHOICES = {
+  service_kinds: SERVICE_KINDS,
+  domain_roles: DOMAIN_ROLES,
+  social_platforms: SOCIAL_PLATFORMS.map(([value, label]) => [value, label]),
+};

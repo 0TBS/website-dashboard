@@ -40,6 +40,7 @@ Each site also keeps its details, each with Add, Edit and Remove:
 | Services & accounts | Every account or resource the site uses: its Cloudflare Worker and zone, Backblaze bucket, database, Tag Manager, Analytics, Search Console, Google Ads, Business Profile, reCAPTCHA, Resend, Cal.com, Stripe, WordPress admin and other hosting. Each has its ID or name, a link to its dashboard, which account owns it, and notes. |
 | Contacts | The client's people: name, role, email, phone and notes. |
 | Domains | Every domain the site uses, and what for (live, staging, images, redirects, old domains), with its registrar, whether its DNS is on Cloudflare, and when it renews. |
+| Social media | The site's TikTok, LinkedIn, Facebook, X and Instagram accounts: the profile link, the handle, which account owns it, and notes. Add asks for the platform first. A link must be on that platform's own domain, so a TikTok link to instagram.com is refused. |
 | History | Every change to the site and its details: when, who (when the desk knows), which field, and what it was before. |
 
 **Never put a password or API key in the desk.** Everyone with the desk key could read it. Write where the login lives instead, such as "1Password → Acme → Cloudflare".
@@ -55,6 +56,7 @@ A site's row can also **Go live**: point its live domain at its staging Worker. 
   | --- | --- |
   | `sites` | One row per site: the fields in the table above. |
   | `site_services`, `site_contacts`, `site_domains` | A site's details, any number of each. They go when the site is deleted. |
+  | `site_tiktok`, `site_linkedin`, `site_facebook`, `site_x`, `site_instagram` | One table per social media platform: `handle`, `url` (the profile link, once per site), `account` and `notes`. They go when the site is deleted. A new platform needs a new table, so it is a new schema step plus one line in `src/details.js`. |
   | `history` | One row per field changed, and one per row added or removed. The database writes it itself, with a trigger, so no change can skip it. It is kept when the site is deleted. |
   | `golive`, `golive_log`, `golive_checks` | Going live: where each site's go-live stands, every step it took, and the last check. |
   | `schema_migrations`, `desk_meta` | Which schema steps have run, and when the old data was copied in. |
@@ -281,10 +283,12 @@ Scripts send `Authorization: Bearer <DASH_KEY>` with every request. The page use
 | POST | `/api/sites` | a site (`name` required) | `201 { site }` |
 | PATCH | `/api/sites/:id` | only the fields to change, optionally `expected_updated_at` | `{ site }`, or `409 { code: "conflict", site }` if the row changed since that time |
 | DELETE | `/api/sites/:id` | – | `{ deleted: id }`, or `409 { code: "golive-active" }` while the site's go-live still needs someone |
-| GET | `/api/sites/:id/details` | – | `{ services, contacts, domains, history, choices }`; `history` is the latest 200 changes, newest first, and `choices` lists the service kinds and domain uses |
-| POST | `/api/sites/:id/services` (or `contacts`, `domains`) | the new item | `201 { item }` |
-| PATCH | `/api/sites/:id/services/:itemId` (or `contacts`, `domains`) | only the fields to change, optionally `expected_updated_at` | `{ item }`, or `409 { code: "conflict", item }` if it changed since that time |
-| DELETE | `/api/sites/:id/services/:itemId` (or `contacts`, `domains`) | – | `{ deleted: itemId }` |
+| GET | `/api/sites/:id/details` | – | `{ services, contacts, domains, tiktok, linkedin, facebook, x, instagram, history, choices }`; `history` is the latest 200 changes, newest first, and `choices` lists the service kinds, domain uses and social media platforms |
+| POST | `/api/sites/:id/:kind` | the new item | `201 { item }` |
+| PATCH | `/api/sites/:id/:kind/:itemId` | only the fields to change, optionally `expected_updated_at` | `{ item }`, or `409 { code: "conflict", item }` if it changed since that time |
+| DELETE | `/api/sites/:id/:kind/:itemId` | – | `{ deleted: itemId }` |
+
+`:kind` is `services`, `contacts`, `domains`, or one of the social media platforms: `tiktok`, `linkedin`, `facebook`, `x`, `instagram`.
 | GET | `/api/golive/signin?site=<id>` | – | Where Access sends you back after its login; needs no desk key. `302` to `/#golive=<id>` (`/` if the id is not a site id), or to `/#golive-error=<code>` |
 | GET | `/api/golive/me` | – | `{ email }` |
 | GET | `/api/golive/:id` | – | `{ site, golive, log, last_check }` |
@@ -303,6 +307,7 @@ Field values:
 - A service: `kind` (required; one of `cloudflare_worker`, `cloudflare_zone`, `backblaze_bucket`, `database`, `gtm`, `ga4`, `search_console`, `google_ads`, `business_profile`, `recaptcha`, `resend`, `calcom`, `stripe`, `wordpress`, `hosting`, `other`), `identifier`, `url` (an http or https link), `account` and `notes`.
 - A contact: `name` (required), `role`, `email`, `phone` and `notes`.
 - A domain: `hostname` (required; a domain without a path, once per site), `role` (required; `live`, `staging`, `image`, `redirect`, `old` or `other`), `registrar`, `dns_on_cloudflare` (`true`, `false` or `null`), `renews_on` (`YYYY-MM-DD`) and `notes`.
+- A social media link (`tiktok`, `linkedin`, `facebook`, `x` or `instagram`): `url` (required; on that platform's own domain, such as `tiktok.com`, or `x.com` or `twitter.com` for X; stored as https; once per site), `handle` (one word, the `@` is dropped), `account` and `notes`.
 - Bad input returns `400 { error, field }`, naming the field that failed.
 - If the database cannot be reached, every request that needs it answers `503 { code: "database-unavailable" }`. After five minutes with no visits, Neon's free plan pauses the database. The next request wakes it, which takes up to a second or two.
 
