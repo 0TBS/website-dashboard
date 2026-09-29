@@ -80,6 +80,8 @@ h1{font-family:"Bricolage Grotesque","Instrument Sans",sans-serif;
   color:var(--paper);background:var(--ink);border:1px solid var(--ink);
   border-radius:999px;padding:8px 15px;touch-action:manipulation}
 .addbtn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+/* The same shape, outlined: a way to somewhere else, not an action here. */
+.addbtn.ghost{color:var(--ink);background:transparent;border-color:var(--line-firm)}
 
 /* ---- status strip: counts that double as filters ---- */
 .status{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
