@@ -1553,6 +1553,7 @@ function lock(why) {
   grid.innerHTML = '';
   $('tools').hidden = true;
   $('logoff').hidden = true;
+  $('revise').hidden = true;
   note.textContent = '';
   dock.hidden = true;
   renderStats();
@@ -1626,6 +1627,7 @@ async function load({ quiet = false } = {}) {
     gate.hidden = true;
     $('tools').hidden = false;
     $('logoff').hidden = false;
+    $('revise').hidden = false;
     if (first || changed) renderGrid();
     siteFromUrl();
     glTakePending();
